@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "brokerage-connect"
+version = "0.1.0"
+description = "Unified Python interface for brokerage APIs — Schwab, SnapTrade, IBKR"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = [
+  "python-dotenv",
+]
+
+[project.optional-dependencies]
+schwab = ["schwab-py"]
+snaptrade = ["snaptrade-python-sdk", "boto3", "botocore"]
+ibkr = ["ib-async"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["brokerage"]
+
+[tool.hatch.build.targets.sdist]
+include = ["brokerage/", "pyproject.toml", "README.md", "LICENSE"]

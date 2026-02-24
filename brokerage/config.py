@@ -43,4 +43,9 @@ SNAPTRADE_CLIENT_ID: str = os.getenv("SNAPTRADE_CLIENT_ID", "")
 SNAPTRADE_CONSUMER_KEY: str = os.getenv("SNAPTRADE_CONSUMER_KEY", "")
 SNAPTRADE_ENVIRONMENT: str = os.getenv("SNAPTRADE_ENVIRONMENT", "production")
 
+PLAID_CLIENT_ID: str = os.getenv("PLAID_CLIENT_ID", "")
+PLAID_SECRET: str = os.getenv("PLAID_SECRET", "")
+PLAID_ENV: str = os.getenv("PLAID_ENV", "production")
+AWS_DEFAULT_REGION: str = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
+
 FRONTEND_BASE_URL: str = os.getenv("FRONTEND_BASE_URL", "http://localhost:3000")

@@ -9,6 +9,7 @@ Unified Python interface for brokerage APIs. One abstract adapter, multiple brok
 | **Schwab** | `pip install brokerage-connect[schwab]` | Token-based auth via `schwab-py` |
 | **SnapTrade** | `pip install brokerage-connect[snaptrade]` | OAuth connection flow |
 | **IBKR** | `pip install brokerage-connect[ibkr]` | Gateway/TWS via `ib-async` |
+| **Plaid** | `pip install brokerage-connect[plaid]` | Investments + account APIs via `plaid-python` |
 
 ## Install
 
@@ -18,6 +19,7 @@ pip install brokerage-connect
 # With broker-specific dependencies:
 pip install brokerage-connect[schwab]
 pip install brokerage-connect[schwab,ibkr]
+pip install brokerage-connect[plaid]
 ```
 
 ## Quick Start
@@ -44,7 +46,7 @@ class MyBroker(BrokerAdapter):
 
 - **`BrokerAdapter`** — abstract base class defining the trade interface
 - **`trade_objects`** — shared dataclasses (`OrderResult`, `OrderPreview`, `OrderStatus`, etc.)
-- **`schwab/`**, **`snaptrade/`**, **`ibkr/`** — concrete adapter implementations
+- **`schwab/`**, **`snaptrade/`**, **`ibkr/`**, **`plaid/`** — broker/provider integrations
 - **`config.py`** — broker configuration and credential loading via environment variables
 
 ## License

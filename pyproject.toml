@@ -13,6 +13,10 @@ dependencies = [
   "python-dotenv",
 ]
 
+[project.urls]
+Homepage = "https://github.com/henrysouchien/brokerage-connect"
+Source = "https://github.com/henrysouchien/brokerage-connect"
+
 [project.optional-dependencies]
 schwab = ["schwab-py"]
 snaptrade = ["snaptrade-python-sdk", "boto3", "botocore"]

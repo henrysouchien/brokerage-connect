@@ -7,7 +7,7 @@ name = "brokerage-connect"
 version = "0.2.0"
 description = "Unified Python interface for brokerage APIs — Schwab, SnapTrade, IBKR, Plaid"
 readme = "README.md"
-license = "MIT"
+license = "PolyForm-Noncommercial-1.0.0"
 requires-python = ">=3.11"
 dependencies = [
   "python-dotenv",

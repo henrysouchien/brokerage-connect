@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "brokerage-connect"
-version = "0.2.0"
+version = "0.2.1"
 description = "Unified Python interface for brokerage APIs — Schwab, SnapTrade, IBKR, Plaid"
 readme = "README.md"
 license = "PolyForm-Noncommercial-1.0.0"

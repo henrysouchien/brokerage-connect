@@ -79,6 +79,28 @@ def get_plaid_token(user_id: str, institution: str, region_name: str) -> dict:
         raise
 
 
+def get_plaid_token_by_item_id(user_id: str, item_id: str, region_name: str) -> dict:
+    """Retrieve Plaid token payload by item_id for a user."""
+    _require_boto3()
+    token_paths = list_user_tokens(user_id, region_name)
+
+    session = boto3.session.Session()
+    client = session.client("secretsmanager", region_name=region_name)
+
+    for path in token_paths:
+        try:
+            response = client.get_secret_value(SecretId=path)
+            payload = json.loads(response["SecretString"])
+            if payload.get("item_id") == item_id:
+                return payload
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] == "ResourceNotFoundException":
+                continue
+            raise
+
+    raise KeyError(f"No Plaid token found for item_id={item_id}")
+
+
 def list_user_tokens(user_id: str, region_name: str) -> list[str]:
     """List Plaid token secret names for a user."""
     _require_boto3()
@@ -135,6 +157,7 @@ def delete_plaid_user_tokens(user_id: str, region_name: str) -> bool:
 __all__ = [
     "delete_plaid_user_tokens",
     "get_plaid_token",
+    "get_plaid_token_by_item_id",
     "list_user_tokens",
     "store_plaid_token",
 ]

@@ -6,7 +6,7 @@ import hashlib
 from typing import Any, Dict, List, Optional
 
 from brokerage._logging import log_error, portfolio_logger
-from brokerage.config import FRONTEND_BASE_URL
+from settings import FRONTEND_BASE_URL
 from brokerage.snaptrade.client import (
     _detail_brokerage_authorization_with_retry,
     _get_user_account_balance_with_retry,

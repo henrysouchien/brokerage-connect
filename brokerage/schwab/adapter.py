@@ -9,6 +9,7 @@ Calls into:
 
 from __future__ import annotations
 
+import math
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
@@ -43,7 +44,10 @@ def _to_float(value: Any) -> Optional[float]:
     try:
         if value is None:
             return None
-        return float(value)
+        result = float(value)
+        if math.isinf(result):
+            return None
+        return result
     except Exception:
         return None
 

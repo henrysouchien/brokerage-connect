@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from typing import Any
 
@@ -46,7 +47,8 @@ def make_json_safe(obj: Any) -> Any:
         return int(obj)
 
     if np is not None and isinstance(obj, (np.float64, np.float32)):
-        return float(obj)
+        f = float(obj)
+        return None if (math.isnan(f) or math.isinf(f)) else f
 
     if np is not None and isinstance(obj, np.bool_):
         return bool(obj)
@@ -62,6 +64,8 @@ def make_json_safe(obj: Any) -> Any:
             pass
 
     if isinstance(obj, (int, float, str, bool, type(None))):
+        if isinstance(obj, float) and (obj != obj or math.isinf(obj)):
+            return None
         return obj
 
     return str(obj)
@@ -71,6 +75,9 @@ def _to_float(value: Any) -> float | None:
     try:
         if value is None:
             return None
-        return float(value)
+        result = float(value)
+        if math.isinf(result):
+            return None
+        return result
     except (TypeError, ValueError):
         return None

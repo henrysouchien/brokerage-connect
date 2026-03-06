@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Any, Callable, Optional, TYPE_CHECKING
 
@@ -160,7 +161,10 @@ def _to_float(value: Any) -> Optional[float]:
     try:
         if value is None:
             return None
-        return float(value)
+        result = float(value)
+        if math.isinf(result):
+            return None
+        return result
     except (TypeError, ValueError):
         return None
 

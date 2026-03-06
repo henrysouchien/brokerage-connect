@@ -95,6 +95,7 @@ class TradePreviewResult:
     post_trade_weight: Optional[float] = None
     requires_confirmation: bool = True
     error: Optional[str] = None
+    broker_provider: Optional[str] = None
 
     def to_api_response(self) -> Dict[str, Any]:
         payload = {
@@ -108,6 +109,7 @@ class TradePreviewResult:
                 "account_id": self.account_id,
                 "expires_at": _iso(self.expires_at),
                 "requires_confirmation": self.requires_confirmation,
+                "broker_provider": self.broker_provider,
             },
             "data": {
                 "preview_id": self.preview_id,
@@ -149,6 +151,8 @@ class TradePreviewResult:
             lines.append(f"- estimated_total: ${self.estimated_total:,.2f}")
         if self.estimated_commission is not None:
             lines.append(f"- estimated_commission: ${self.estimated_commission:,.2f}")
+        if self.broker_provider:
+            lines.append(f"- broker_provider: {self.broker_provider}")
         if self.pre_trade_weight is not None and self.post_trade_weight is not None:
             lines.append(f"- weight_change: {self.pre_trade_weight:.2%} -> {self.post_trade_weight:.2%}")
         if self.validation:
@@ -180,6 +184,7 @@ class TradeExecutionResult:
     cancelled_at: Optional[datetime] = None
     message: Optional[str] = None
     error: Optional[str] = None
+    broker_provider: Optional[str] = None
     new_preview: Optional[TradePreviewResult] = None
 
     def to_api_response(self) -> Dict[str, Any]:
@@ -195,6 +200,7 @@ class TradeExecutionResult:
                 "preview_id": self.preview_id,
                 "order_id": self.order_id,
                 "brokerage_order_id": self.brokerage_order_id,
+                "broker_provider": self.broker_provider,
             },
             "data": {
                 "account_id": self.account_id,
@@ -219,6 +225,8 @@ class TradeExecutionResult:
             lines.append(f"- order_id: {self.order_id}")
         if self.brokerage_order_id:
             lines.append(f"- brokerage_order_id: {self.brokerage_order_id}")
+        if self.broker_provider:
+            lines.append(f"- broker_provider: {self.broker_provider}")
         if self.account_id and self.ticker and self.side and self.quantity is not None:
             lines.append(f"- order: {self.side} {self.quantity} {self.ticker} @ {self.account_id}")
         if self.order_status:
@@ -342,6 +350,7 @@ class OrderPreview:
     trade_impacts: List[Dict[str, Any]] = field(default_factory=list)
     impact_response: Optional[Dict[str, Any]] = None
     broker_preview_data: Optional[Dict[str, Any]] = None
+    warnings: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return make_json_safe(
@@ -349,6 +358,7 @@ class OrderPreview:
                 "estimated_price": self.estimated_price,
                 "estimated_total": self.estimated_total,
                 "estimated_commission": self.estimated_commission,
+                "warnings": self.warnings,
                 "broker_trade_id": self.broker_trade_id,
                 "combined_remaining_balance": self.combined_remaining_balance,
                 "trade_impacts": self.trade_impacts,

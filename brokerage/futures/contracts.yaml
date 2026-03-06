@@ -1,0 +1,184 @@
+# Canonical futures contract specifications (broker-agnostic)
+contracts:
+  ES:
+    multiplier: 50
+    tick_size: 0.25
+    currency: USD
+    exchange: CME
+    asset_class: equity_index
+    fmp_symbol: ESUSD
+  MES:
+    multiplier: 5
+    tick_size: 0.25
+    currency: USD
+    exchange: CME
+    asset_class: equity_index
+    fmp_symbol: ESUSD
+  NQ:
+    multiplier: 20
+    tick_size: 0.25
+    currency: USD
+    exchange: CME
+    asset_class: equity_index
+    fmp_symbol: NQUSD
+  MNQ:
+    multiplier: 2
+    tick_size: 0.25
+    currency: USD
+    exchange: CME
+    asset_class: equity_index
+    fmp_symbol: NQUSD
+  YM:
+    multiplier: 5
+    tick_size: 1.0
+    currency: USD
+    exchange: CBOT
+    asset_class: equity_index
+    fmp_symbol: YMUSD
+  RTY:
+    multiplier: 50
+    tick_size: 0.10
+    currency: USD
+    exchange: CME
+    asset_class: equity_index
+    fmp_symbol: RTYUSD
+  NKD:
+    multiplier: 5
+    tick_size: 5.0
+    currency: USD
+    exchange: CME
+    asset_class: equity_index
+    fmp_symbol: "^N225"
+  MNK:
+    multiplier: 0.5
+    tick_size: 5.0
+    currency: USD
+    exchange: CME
+    asset_class: equity_index
+    fmp_symbol: "^N225"
+  NIY:
+    multiplier: 500
+    tick_size: 5.0
+    currency: JPY
+    exchange: CME
+    asset_class: equity_index
+    fmp_symbol: "^N225"
+  ESTX50:
+    multiplier: 10
+    tick_size: 1.0
+    currency: EUR
+    exchange: EUREX
+    asset_class: equity_index
+    fmp_symbol: "^STOXX50E"
+  DAX:
+    multiplier: 25
+    tick_size: 1.0
+    currency: EUR
+    exchange: EUREX
+    asset_class: equity_index
+    fmp_symbol: "^GDAXI"
+  Z:
+    multiplier: 10
+    tick_size: 0.5
+    currency: GBP
+    exchange: ICEEU
+    asset_class: equity_index
+    fmp_symbol: "^FTSE"
+  HSI:
+    multiplier: 50
+    tick_size: 1.0
+    currency: HKD
+    exchange: HKFE
+    asset_class: equity_index
+    fmp_symbol: "^HSI"
+  GC:
+    multiplier: 100
+    tick_size: 0.10
+    currency: USD
+    exchange: COMEX
+    asset_class: metals
+    fmp_symbol: GCUSD
+  MGC:
+    multiplier: 10
+    tick_size: 0.10
+    currency: USD
+    exchange: COMEX
+    asset_class: metals
+    fmp_symbol: MGCUSD
+  SI:
+    multiplier: 5000
+    tick_size: 0.005
+    currency: USD
+    exchange: COMEX
+    asset_class: metals
+    fmp_symbol: SIUSD
+  HG:
+    multiplier: 25000
+    tick_size: 0.0005
+    currency: USD
+    exchange: COMEX
+    asset_class: metals
+    fmp_symbol: HGUSD
+  PL:
+    multiplier: 50
+    tick_size: 0.10
+    currency: USD
+    exchange: NYMEX
+    asset_class: metals
+    fmp_symbol: PLUSD
+  PA:
+    multiplier: 100
+    tick_size: 0.05
+    currency: USD
+    exchange: NYMEX
+    asset_class: metals
+    fmp_symbol: PAUSD
+  CL:
+    multiplier: 1000
+    tick_size: 0.01
+    currency: USD
+    exchange: NYMEX
+    asset_class: energy
+    fmp_symbol: CLUSD
+  BZ:
+    multiplier: 1000
+    tick_size: 0.01
+    currency: USD
+    exchange: NYMEX
+    asset_class: energy
+    fmp_symbol: BZUSD
+  NG:
+    multiplier: 10000
+    tick_size: 0.001
+    currency: USD
+    exchange: NYMEX
+    asset_class: energy
+    fmp_symbol: NGUSD
+  ZB:
+    multiplier: 1000
+    tick_size: 0.03125
+    currency: USD
+    exchange: CBOT
+    asset_class: fixed_income
+    fmp_symbol: ZBUSD
+  ZN:
+    multiplier: 1000
+    tick_size: 0.015625
+    currency: USD
+    exchange: CBOT
+    asset_class: fixed_income
+    fmp_symbol: ZNUSD
+  ZF:
+    multiplier: 1000
+    tick_size: 0.0078125
+    currency: USD
+    exchange: CBOT
+    asset_class: fixed_income
+    fmp_symbol: ZFUSD
+  ZT:
+    multiplier: 2000
+    tick_size: 0.00390625
+    currency: USD
+    exchange: CBOT
+    asset_class: fixed_income
+    fmp_symbol: ZTUSD

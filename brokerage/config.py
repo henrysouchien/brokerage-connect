@@ -3,36 +3,12 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
-
-try:
-    from dotenv import load_dotenv
-
-    _pkg_dir = Path(__file__).resolve().parent
-    load_dotenv(_pkg_dir / ".env", override=False)
-    load_dotenv(_pkg_dir.parent / ".env", override=False)
-except Exception:
-    pass
-
-
-def _int_env(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return default
-
-
-IBKR_READONLY: bool = os.getenv("IBKR_READONLY", "false").lower() == "true"
-IBKR_AUTHORIZED_ACCOUNTS: list[str] = [
-    account.strip()
-    for account in os.getenv("IBKR_AUTHORIZED_ACCOUNTS", "").split(",")
-    if account.strip()
-]
-IBKR_GATEWAY_HOST: str = os.getenv("IBKR_GATEWAY_HOST", "127.0.0.1")
-IBKR_GATEWAY_PORT: int = _int_env("IBKR_GATEWAY_PORT", 7496)
+from ibkr.config import (
+    IBKR_AUTHORIZED_ACCOUNTS,
+    IBKR_GATEWAY_HOST,
+    IBKR_GATEWAY_PORT,
+    IBKR_READONLY,
+)
 
 SCHWAB_APP_KEY: str = os.getenv("SCHWAB_APP_KEY", "")
 SCHWAB_APP_SECRET: str = os.getenv("SCHWAB_APP_SECRET", "")
@@ -47,5 +23,3 @@ PLAID_CLIENT_ID: str = os.getenv("PLAID_CLIENT_ID", "")
 PLAID_SECRET: str = os.getenv("PLAID_SECRET", "")
 PLAID_ENV: str = os.getenv("PLAID_ENV", "production")
 AWS_DEFAULT_REGION: str = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
-
-FRONTEND_BASE_URL: str = os.getenv("FRONTEND_BASE_URL", "http://localhost:3000")

@@ -101,6 +101,38 @@ def create_hosted_link_token(
     }
 
 
+def create_update_link_token(
+    client: "plaid_api.PlaidApi",
+    access_token: str,
+    user_id: str,
+    redirect_uri: str = "https://yourapp.com/plaid/complete",
+    webhook_uri: str = "https://yourapp.com/plaid/webhook",
+    client_name: str = "Risk Analysis App",
+    is_mobile_app: bool = False,
+) -> dict:
+    """Create a hosted Plaid Link token in update mode for re-authentication."""
+    _require_plaid_sdk()
+
+    req = LinkTokenCreateRequest(
+        user=LinkTokenCreateRequestUser(client_user_id=user_id),
+        client_name=client_name,
+        access_token=access_token,
+        country_codes=[CountryCode("US")],
+        language="en",
+        hosted_link={
+            "completion_redirect_uri": redirect_uri,
+            "is_mobile_app": is_mobile_app,
+        },
+        webhook=webhook_uri,
+    )
+
+    resp = client.link_token_create(req)
+    return {
+        "link_token": resp.link_token,
+        "hosted_link_url": resp.hosted_link_url,
+    }
+
+
 def wait_for_public_token(
     link_token: str,
     timeout: int = 300,
@@ -282,6 +314,7 @@ __all__ = [
     "client",
     "create_client",
     "create_hosted_link_token",
+    "create_update_link_token",
     "fetch_plaid_balances",
     "fetch_plaid_holdings",
     "get_institution_info",

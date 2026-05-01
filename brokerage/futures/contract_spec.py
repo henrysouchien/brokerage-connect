@@ -5,8 +5,6 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional, cast
 
-import yaml
-
 FuturesAssetClass = Literal[
     "equity_index",
     "fixed_income",
@@ -74,6 +72,8 @@ class FuturesContractSpec:
 @lru_cache(maxsize=1)
 def _load_contracts_yaml() -> Dict[str, Any]:
     """Load the canonical futures contracts catalog."""
+    import yaml
+
     yaml_path = Path(__file__).resolve().with_name("contracts.yaml")
     with yaml_path.open("r", encoding="utf-8") as f:
         payload = yaml.safe_load(f) or {}

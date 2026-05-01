@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from typing import List, Optional, Protocol
+from typing import TYPE_CHECKING, List, Optional, Protocol
 
-import pandas as pd
+if TYPE_CHECKING:
+    # pandas is type-only here; declare a runtime dependency if direct use is added.
+    import pandas as pd
 
 
 class FuturesPriceSource(Protocol):

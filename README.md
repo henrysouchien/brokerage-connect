@@ -51,4 +51,4 @@ class MyBroker(BrokerAdapter):
 
 ## License
 
-MIT
+PolyForm-Noncommercial-1.0.0

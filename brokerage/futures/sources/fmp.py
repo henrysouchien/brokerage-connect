@@ -4,7 +4,7 @@ from typing import Optional
 
 import pandas as pd
 
-from portfolio_risk_engine._ticker import fetch_fmp_quote_with_currency, normalize_fmp_price
+from portfolio_risk_engine._ticker import infer_currency, normalize_minor_currency_price
 from portfolio_risk_engine.data_loader import fetch_monthly_close
 
 
@@ -21,13 +21,13 @@ class FMPFuturesPriceSource:
         if not alt_symbol:
             return None
 
-        prices = fetch_monthly_close(alt_symbol, fmp_ticker=alt_symbol)
+        prices = fetch_monthly_close(alt_symbol)
         if prices is None or prices.empty or prices.dropna().empty:
             return None
 
         raw_price = float(prices.dropna().iloc[-1])
-        _, fmp_currency = fetch_fmp_quote_with_currency(alt_symbol)
-        normalized_price, _ = normalize_fmp_price(raw_price, fmp_currency)
+        fmp_currency = infer_currency(alt_symbol)
+        normalized_price, _ = normalize_minor_currency_price(raw_price, fmp_currency)
         if normalized_price is None:
             return raw_price
         return float(normalized_price)
@@ -48,7 +48,6 @@ class FMPFuturesPriceSource:
             alt_symbol,
             start_date=start_date,
             end_date=end_date,
-            fmp_ticker=alt_symbol,
         )
         if prices is None or prices.empty:
             return None

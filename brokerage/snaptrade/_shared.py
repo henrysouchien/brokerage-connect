@@ -92,6 +92,17 @@ def handle_snaptrade_api_exception(e: ApiException, operation: str) -> bool:
         return False
 
 
+def is_snaptrade_secret_error(e: Exception) -> bool:
+    """Check if exception is a SnapTrade 401 invalid-secret error."""
+    return isinstance(e, ApiException) and getattr(e, "status", None) == 401
+
+
+def _budget_kwargs(budget_user_id: int | None) -> dict[str, int]:
+    if budget_user_id is None:
+        return {}
+    return {"budget_user_id": budget_user_id}
+
+
 def with_snaptrade_retry(operation_name: str, max_retries: int = 3) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Retry decorator for SnapTrade SDK calls using shared error classification."""
 
@@ -144,15 +155,13 @@ def _extract_snaptrade_body(response: Any) -> Any:
     return response
 
 
-def _get_snaptrade_identity(user_email: str) -> tuple[str, str]:
-    """Resolve SnapTrade user_id/user_secret pair from user email."""
-    from brokerage.snaptrade.secrets import get_snaptrade_user_secret
+def _get_snaptrade_identity(user_email: str, user_secret: str) -> tuple[str, str]:
+    """Resolve SnapTrade user_id/user_secret pair from caller-provided secret."""
     from brokerage.snaptrade.users import get_snaptrade_user_id_from_email
 
-    user_id = get_snaptrade_user_id_from_email(user_email)
-    user_secret = get_snaptrade_user_secret(user_email)
     if not user_secret:
-        raise ValueError(f"No SnapTrade user secret found for {user_email}")
+        raise ValueError(f"SnapTrade user_secret required for {user_email}")
+    user_id = get_snaptrade_user_id_from_email(user_email)
     return user_id, user_secret
 
 
@@ -175,5 +184,6 @@ __all__ = [
     "_get_snaptrade_identity",
     "_to_float",
     "handle_snaptrade_api_exception",
+    "is_snaptrade_secret_error",
     "with_snaptrade_retry",
 ]

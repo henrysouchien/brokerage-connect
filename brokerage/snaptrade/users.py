@@ -5,15 +5,11 @@ from __future__ import annotations
 import hashlib
 
 from brokerage._logging import log_error, portfolio_logger
-from brokerage.snaptrade._shared import ApiException
+from brokerage.snaptrade._shared import ApiException, _budget_kwargs
 from brokerage.snaptrade.client import (
     _delete_snap_trade_user_with_retry,
     _register_snap_trade_user_with_retry,
-)
-from brokerage.snaptrade.secrets import (
-    delete_snaptrade_user_secret,
-    get_snaptrade_user_secret,
-    store_snaptrade_user_secret,
+    _require_snaptrade_client,
 )
 
 
@@ -23,15 +19,23 @@ def get_snaptrade_user_id_from_email(email: str) -> str:
     return f"user_{user_hash}"
 
 
-def register_snaptrade_user(user_email: str, client) -> str:
-    """Register user in SnapTrade and persist user secret."""
+def register_snaptrade_user(
+    user_email: str,
+    *,
+    budget_user_id: int | None = None,
+) -> str:
+    """Register user in SnapTrade and return the newly issued user secret."""
+    client = _require_snaptrade_client()
     try:
         snaptrade_user_id = get_snaptrade_user_id_from_email(user_email)
         user_hash = hashlib.sha256(snaptrade_user_id.encode()).hexdigest()[:16]
 
-        response = _register_snap_trade_user_with_retry(client, snaptrade_user_id)
+        response = _register_snap_trade_user_with_retry(
+            client,
+            snaptrade_user_id,
+            **_budget_kwargs(budget_user_id),
+        )
         user_secret = response.body["userSecret"]
-        store_snaptrade_user_secret(user_email, user_secret)
 
         portfolio_logger.info("✅ Registered SnapTrade user: %s", user_hash)
         return user_secret
@@ -39,23 +43,9 @@ def register_snaptrade_user(user_email: str, client) -> str:
     except ApiException as e:
         if "already exist" in str(e).lower():
             portfolio_logger.info("ℹ️ SnapTrade user already exists: %s", user_hash)
-            existing_secret = get_snaptrade_user_secret(user_email)
-            if existing_secret and not existing_secret.startswith("needs_reconnection_"):
-                portfolio_logger.info("✅ Using stored secret for existing user: %s", user_hash)
-                return existing_secret
-            if existing_secret and existing_secret.startswith("needs_reconnection_"):
-                portfolio_logger.warning(
-                    "⚠️ Found reconnection marker for existing SnapTrade user: %s",
-                    user_hash,
-                )
-            else:
-                portfolio_logger.warning(
-                    "⚠️ User exists in SnapTrade but no secret in AWS storage"
-                )
             raise RuntimeError(
-                "SnapTrade user exists but no valid AWS user secret is available. "
-                "Automatic delete/recreate is disabled to protect brokerage connections. "
-                "Operator action required: manually re-register this user to restore credentials."
+                "SnapTrade user already exists. Use the stored user_secret to create a "
+                "connection URL, or run recovery if the secret is unavailable."
             )
 
         log_error("snaptrade_user", "register_user", e)
@@ -65,21 +55,31 @@ def register_snaptrade_user(user_email: str, client) -> str:
         raise
 
 
-def delete_snaptrade_user(user_email: str, client) -> None:
-    """Delete user from SnapTrade and clean up local secret storage."""
+def delete_snaptrade_user(
+    user_email: str,
+    user_secret: str,
+    *,
+    budget_user_id: int | None = None,
+) -> None:
+    """Delete user from SnapTrade. Caller owns local secret cleanup."""
+    if not user_secret:
+        raise ValueError(f"SnapTrade user_secret required for {user_email}")
+    client = _require_snaptrade_client()
     try:
         snaptrade_user_id = get_snaptrade_user_id_from_email(user_email)
         user_hash = hashlib.sha256(snaptrade_user_id.encode()).hexdigest()[:16]
 
-        _delete_snap_trade_user_with_retry(client, snaptrade_user_id)
-        delete_snaptrade_user_secret(user_email)
+        _delete_snap_trade_user_with_retry(
+            client,
+            snaptrade_user_id,
+            **_budget_kwargs(budget_user_id),
+        )
         portfolio_logger.info("✅ Deleted SnapTrade user: %s", user_hash)
 
     except ApiException as e:
         if "not found" in str(e).lower():
-            delete_snaptrade_user_secret(user_email)
             portfolio_logger.info(
-                "ℹ️ SnapTrade user not found, cleaned up locally: %s",
+                "ℹ️ SnapTrade user not found: %s",
                 user_hash,
             )
             return

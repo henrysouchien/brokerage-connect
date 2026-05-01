@@ -2,48 +2,55 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from brokerage._logging import log_error
-from brokerage.snaptrade._shared import (
-    _extract_snaptrade_body,
-    _get_snaptrade_identity,
-    _to_float,
-)
+from brokerage.snaptrade._shared import _budget_kwargs, _extract_snaptrade_body, _to_float
 from brokerage.snaptrade.client import (
+    _call_with_secret_rotation,
     _cancel_order_with_retry,
     _get_order_impact_with_retry,
     _get_user_account_orders_with_retry,
     _place_order_with_retry,
+    _require_snaptrade_client,
     _symbol_search_user_account_with_retry,
-    get_snaptrade_client,
 )
 
 
 def search_snaptrade_symbol(
     user_email: str,
+    user_secret: str,
     account_id: str,
     ticker: str,
-    client=None,
+    *,
+    on_secret_rotated: Callable[[str], None] | None = None,
+    refresh_secret: Callable[[], str | None] | None = None,
+    budget_user_id: int | None = None,
 ) -> Dict[str, Any]:
     """Search account-supported symbols and require exact ticker match."""
-    if not client:
-        client = get_snaptrade_client()
-    if not client:
-        raise ValueError("SnapTrade client unavailable")
+    client = _require_snaptrade_client()
 
     try:
-        user_id, user_secret = _get_snaptrade_identity(user_email)
         ticker_upper = (ticker or "").upper().strip()
         if not ticker_upper:
             raise ValueError("Ticker is required")
 
-        response = _symbol_search_user_account_with_retry(
-            client,
-            user_id,
+        response = _call_with_secret_rotation(
+            user_email,
             user_secret,
-            account_id,
-            ticker_upper,
+            lambda user_id, secret: _symbol_search_user_account_with_retry(
+                client,
+                user_id,
+                secret,
+                account_id,
+                ticker_upper,
+                **_budget_kwargs(budget_user_id),
+            ),
+            on_secret_rotated=on_secret_rotated,
+            refresh_secret=refresh_secret,
+            operation_name="search_snaptrade_symbol",
+            user_id=budget_user_id,
+            budget_user_id=budget_user_id,
         )
         symbols = _extract_snaptrade_body(response) or []
 
@@ -98,6 +105,7 @@ def search_snaptrade_symbol(
 
 def preview_snaptrade_order(
     user_email: str,
+    user_secret: str,
     account_id: str,
     ticker: str,
     side: str,
@@ -107,16 +115,15 @@ def preview_snaptrade_order(
     limit_price: Optional[float] = None,
     stop_price: Optional[float] = None,
     universal_symbol_id: Optional[str] = None,
-    client=None,
+    *,
+    on_secret_rotated: Callable[[str], None] | None = None,
+    refresh_secret: Callable[[], str | None] | None = None,
+    budget_user_id: int | None = None,
 ) -> Dict[str, Any]:
     """Preview an order via SnapTrade `get_order_impact` and parse key fields."""
-    if not client:
-        client = get_snaptrade_client()
-    if not client:
-        raise ValueError("SnapTrade client unavailable")
+    client = _require_snaptrade_client()
 
     try:
-        user_id, user_secret = _get_snaptrade_identity(user_email)
         side = (side or "").upper().strip()
 
         symbol_info = None
@@ -124,24 +131,37 @@ def preview_snaptrade_order(
         if not resolved_symbol_id:
             symbol_info = search_snaptrade_symbol(
                 user_email=user_email,
+                user_secret=user_secret,
                 account_id=account_id,
                 ticker=ticker,
-                client=client,
+                on_secret_rotated=on_secret_rotated,
+                refresh_secret=refresh_secret,
+                **_budget_kwargs(budget_user_id),
             )
             resolved_symbol_id = symbol_info["universal_symbol_id"]
 
-        response = _get_order_impact_with_retry(
-            client=client,
-            user_id=user_id,
-            user_secret=user_secret,
-            account_id=account_id,
-            side=side,
-            universal_symbol_id=resolved_symbol_id,
-            order_type=order_type,
-            time_in_force=time_in_force,
-            quantity=float(quantity),
-            limit_price=_to_float(limit_price),
-            stop_price=_to_float(stop_price),
+        response = _call_with_secret_rotation(
+            user_email,
+            user_secret,
+            lambda user_id, secret: _get_order_impact_with_retry(
+                client=client,
+                user_id=user_id,
+                user_secret=secret,
+                account_id=account_id,
+                side=side,
+                universal_symbol_id=resolved_symbol_id,
+                order_type=order_type,
+                time_in_force=time_in_force,
+                quantity=float(quantity),
+                limit_price=_to_float(limit_price),
+                stop_price=_to_float(stop_price),
+                **_budget_kwargs(budget_user_id),
+            ),
+            on_secret_rotated=on_secret_rotated,
+            refresh_secret=refresh_secret,
+            operation_name="preview_snaptrade_order",
+            user_id=budget_user_id,
+            budget_user_id=budget_user_id,
         )
 
         impact = _extract_snaptrade_body(response) or {}
@@ -192,24 +212,34 @@ def preview_snaptrade_order(
 
 def place_snaptrade_checked_order(
     user_email: str,
+    user_secret: str,
     snaptrade_trade_id: str,
     wait_to_confirm: bool = True,
-    client=None,
+    *,
+    on_secret_rotated: Callable[[str], None] | None = None,
+    refresh_secret: Callable[[], str | None] | None = None,
+    budget_user_id: int | None = None,
 ) -> Dict[str, Any]:
     """Submit previously previewed order by SnapTrade `trade_id`."""
-    if not client:
-        client = get_snaptrade_client()
-    if not client:
-        raise ValueError("SnapTrade client unavailable")
+    client = _require_snaptrade_client()
 
     try:
-        user_id, user_secret = _get_snaptrade_identity(user_email)
-        response = _place_order_with_retry(
-            client=client,
-            user_id=user_id,
-            user_secret=user_secret,
-            trade_id=snaptrade_trade_id,
-            wait_to_confirm=wait_to_confirm,
+        response = _call_with_secret_rotation(
+            user_email,
+            user_secret,
+            lambda user_id, secret: _place_order_with_retry(
+                client=client,
+                user_id=user_id,
+                user_secret=secret,
+                trade_id=snaptrade_trade_id,
+                wait_to_confirm=wait_to_confirm,
+                **_budget_kwargs(budget_user_id),
+            ),
+            on_secret_rotated=on_secret_rotated,
+            refresh_secret=refresh_secret,
+            operation_name="place_snaptrade_checked_order",
+            user_id=budget_user_id,
+            budget_user_id=budget_user_id,
         )
         return _extract_snaptrade_body(response) or {}
     except Exception as e:
@@ -219,26 +249,36 @@ def place_snaptrade_checked_order(
 
 def get_snaptrade_orders(
     user_email: str,
+    user_secret: str,
     account_id: str,
     state: str = "all",
     days: int = 30,
-    client=None,
+    *,
+    on_secret_rotated: Callable[[str], None] | None = None,
+    refresh_secret: Callable[[], str | None] | None = None,
+    budget_user_id: int | None = None,
 ) -> List[Dict[str, Any]]:
     """Fetch account orders from `account_information` namespace."""
-    if not client:
-        client = get_snaptrade_client()
-    if not client:
-        raise ValueError("SnapTrade client unavailable")
+    client = _require_snaptrade_client()
 
     try:
-        user_id, user_secret = _get_snaptrade_identity(user_email)
-        response = _get_user_account_orders_with_retry(
-            client=client,
-            user_id=user_id,
-            user_secret=user_secret,
-            account_id=account_id,
-            state=state,
-            days=days,
+        response = _call_with_secret_rotation(
+            user_email,
+            user_secret,
+            lambda user_id, secret: _get_user_account_orders_with_retry(
+                client=client,
+                user_id=user_id,
+                user_secret=secret,
+                account_id=account_id,
+                state=state,
+                days=days,
+                **_budget_kwargs(budget_user_id),
+            ),
+            on_secret_rotated=on_secret_rotated,
+            refresh_secret=refresh_secret,
+            operation_name="get_snaptrade_orders",
+            user_id=budget_user_id,
+            budget_user_id=budget_user_id,
         )
         orders = _extract_snaptrade_body(response) or []
         return orders if isinstance(orders, list) else [orders]
@@ -249,24 +289,34 @@ def get_snaptrade_orders(
 
 def cancel_snaptrade_order(
     user_email: str,
+    user_secret: str,
     account_id: str,
     order_id: str,
-    client=None,
+    *,
+    on_secret_rotated: Callable[[str], None] | None = None,
+    refresh_secret: Callable[[], str | None] | None = None,
+    budget_user_id: int | None = None,
 ) -> Dict[str, Any]:
     """Cancel an existing brokerage order."""
-    if not client:
-        client = get_snaptrade_client()
-    if not client:
-        raise ValueError("SnapTrade client unavailable")
+    client = _require_snaptrade_client()
 
     try:
-        user_id, user_secret = _get_snaptrade_identity(user_email)
-        response = _cancel_order_with_retry(
-            client=client,
-            user_id=user_id,
-            user_secret=user_secret,
-            account_id=account_id,
-            brokerage_order_id=order_id,
+        response = _call_with_secret_rotation(
+            user_email,
+            user_secret,
+            lambda user_id, secret: _cancel_order_with_retry(
+                client=client,
+                user_id=user_id,
+                user_secret=secret,
+                account_id=account_id,
+                brokerage_order_id=order_id,
+                **_budget_kwargs(budget_user_id),
+            ),
+            on_secret_rotated=on_secret_rotated,
+            refresh_secret=refresh_secret,
+            operation_name="cancel_snaptrade_order",
+            user_id=budget_user_id,
+            budget_user_id=budget_user_id,
         )
         return _extract_snaptrade_body(response) or {}
     except Exception as e:

@@ -12,20 +12,30 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, UTC
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 
 from brokerage._vendor import make_json_safe
 
 
 ALLOWED_ORDER_TYPES = ("Market", "Limit", "Stop", "StopLimit")
 ALLOWED_TIME_IN_FORCE = ("Day", "GTC", "FOK", "IOC")
-ALLOWED_SIDES = ("BUY", "SELL")
+ALLOWED_SIDES = ("BUY", "SELL", "SHORT", "COVER")
 
 
 def _iso(value: Optional[datetime]) -> Optional[str]:
     if isinstance(value, datetime):
         return value.isoformat()
     return value
+
+
+def _safe_float(value: Any) -> float | None:
+    """Coerce a value (for example Decimal from DB) to float, or None."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 @dataclass
@@ -96,6 +106,7 @@ class TradePreviewResult:
     requires_confirmation: bool = True
     error: Optional[str] = None
     broker_provider: Optional[str] = None
+    market_data: Optional[Dict[str, Any]] = None
 
     def to_api_response(self) -> Dict[str, Any]:
         payload = {
@@ -125,6 +136,7 @@ class TradePreviewResult:
                 "estimated_price": self.estimated_price,
                 "estimated_total": self.estimated_total,
                 "estimated_commission": self.estimated_commission,
+                "market_data": self.market_data,
                 "combined_remaining_balance": self.combined_remaining_balance,
                 "trade_impacts": self.trade_impacts,
                 "pre_trade_weight": self.pre_trade_weight,
@@ -153,6 +165,18 @@ class TradePreviewResult:
             lines.append(f"- estimated_commission: ${self.estimated_commission:,.2f}")
         if self.broker_provider:
             lines.append(f"- broker_provider: {self.broker_provider}")
+        if self.market_data:
+            lines.append("Market Data:")
+            for leg in ("front_month", "back_month"):
+                leg_data = self.market_data.get(leg)
+                if leg_data and not leg_data.get("error"):
+                    lines.append(
+                        f"  {leg}: bid={leg_data.get('bid')} ask={leg_data.get('ask')} "
+                        f"mid={leg_data.get('mid')} last={leg_data.get('last')}"
+                    )
+            spread = self.market_data.get("spread", {})
+            if spread.get("mid") is not None:
+                lines.append(f"  spread_mid: {spread['mid']:.4f}")
         if self.pre_trade_weight is not None and self.post_trade_weight is not None:
             lines.append(f"- weight_change: {self.pre_trade_weight:.2%} -> {self.post_trade_weight:.2%}")
         if self.validation:
@@ -255,6 +279,81 @@ class TradeExecutionResult:
 
 
 @dataclass
+class BrokerFillRecord:
+    """Normalized fill record for workflow action execution_result."""
+
+    OWNED_KEYS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "ticker",
+            "side",
+            "fill_price",
+            "filled_quantity",
+            "commission",
+            "total_cost",
+            "order_status",
+            "brokerage_order_id",
+            "account_id",
+            "broker_provider",
+            "filled_at",
+        }
+    )
+
+    ticker: Optional[str] = None
+    side: Optional[str] = None
+    fill_price: Optional[float] = None
+    filled_quantity: Optional[float] = None
+    commission: Optional[float] = None
+    total_cost: Optional[float] = None
+    order_status: Optional[str] = None
+    brokerage_order_id: Optional[str] = None
+    account_id: Optional[str] = None
+    broker_provider: Optional[str] = None
+    filled_at: Optional[str] = None
+
+    @classmethod
+    def from_trade_order_row(cls, row: dict[str, Any]) -> "BrokerFillRecord":
+        """Build from a trade_orders row with normalized fill field names."""
+        filled_at_raw = row.get("filled_at")
+        filled_at_value = None
+        if filled_at_raw is not None:
+            filled_at_value = (
+                filled_at_raw.isoformat()
+                if hasattr(filled_at_raw, "isoformat")
+                else str(filled_at_raw)
+            )
+
+        return cls(
+            ticker=row.get("ticker"),
+            side=row.get("side"),
+            fill_price=_safe_float(row.get("average_fill_price")),
+            filled_quantity=_safe_float(row.get("filled_quantity")),
+            commission=_safe_float(row.get("commission")),
+            total_cost=_safe_float(row.get("total_cost")),
+            order_status=row.get("order_status"),
+            brokerage_order_id=(
+                str(row["brokerage_order_id"])
+                if row.get("brokerage_order_id") is not None
+                else None
+            ),
+            account_id=row.get("account_id"),
+            broker_provider=row.get("broker_provider"),
+            filled_at=filled_at_value,
+        )
+
+    def has_fill_evidence(self) -> bool:
+        return (
+            self.filled_quantity is not None
+            and self.filled_quantity > 0
+            and self.fill_price is not None
+            and self.fill_price != 0
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dict while preserving None-valued keys."""
+        return dict(self.__dict__)
+
+
+@dataclass
 class OrderListResult:
     """Order-history envelope used by list orders endpoints/tools."""
 
@@ -265,6 +364,8 @@ class OrderListResult:
     state: str = "all"
     days: int = 30
     error: Optional[str] = None
+    accounts_queried: List[str] = field(default_factory=list)
+    provider_errors: Dict[str, str] = field(default_factory=dict)
 
     def to_api_response(self) -> Dict[str, Any]:
         payload = {
@@ -276,6 +377,8 @@ class OrderListResult:
             "metadata": {
                 "user_email": self.user_email,
                 "account_id": self.account_id,
+                "accounts_queried": self.accounts_queried,
+                "provider_errors": self.provider_errors or None,
                 "state": self.state,
                 "days": self.days,
                 "order_count": len(self.orders),
@@ -287,19 +390,28 @@ class OrderListResult:
         return make_json_safe(payload)
 
     def to_formatted_report(self) -> str:
+        account_label = self.account_id
+        if account_label is None:
+            account_label = f"all ({len(self.accounts_queried)} accounts)"
         lines = [
             "Order List",
             f"- status: {self.status}",
-            f"- account_id: {self.account_id}",
+            f"- account_id: {account_label}",
             f"- state: {self.state}",
             f"- days: {self.days}",
             f"- count: {len(self.orders)}",
         ]
+        if self.accounts_queried:
+            lines.append(f"- accounts: {', '.join(self.accounts_queried)}")
+        for provider, error in self.provider_errors.items():
+            lines.append(f"- {provider} discovery failed: {error}")
         if self.error:
             lines.append(f"- error: {self.error}")
         for order in self.orders[:25]:
+            account_name = order.get("account_name") or order.get("account_id") or ""
+            account_prefix = f"[{account_name}] " if account_name else ""
             lines.append(
-                f"  - {order.get('status') or order.get('order_status')} "
+                f"  - {account_prefix}{order.get('status') or order.get('order_status')} "
                 f"{order.get('action') or order.get('side')} "
                 f"{order.get('units') or order.get('quantity')} "
                 f"{order.get('ticker') or order.get('symbol')} "
@@ -460,6 +572,7 @@ __all__ = [
     "ALLOWED_ORDER_TYPES",
     "ALLOWED_SIDES",
     "ALLOWED_TIME_IN_FORCE",
+    "BrokerFillRecord",
     "BrokerAccount",
     "CancelResult",
     "OrderListResult",
@@ -470,4 +583,5 @@ __all__ = [
     "TradeExecutionResult",
     "TradePreviewResult",
     "_iso",
+    "_safe_float",
 ]

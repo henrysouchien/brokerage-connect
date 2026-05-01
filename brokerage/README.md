@@ -1,54 +1,56 @@
-# brokerage-connect
+# risk-module-brokerage
 
-Unified Python interface for brokerage APIs. One abstract adapter, multiple brokers.
+`brokerage/` is the extracted brokerage package used by the backend trade-execution and provider-integration flows in this repo.
 
-## Supported Brokers
+Package metadata lives in `brokerage/pyproject.toml` under the name `risk-module-brokerage`.
 
-| Broker | Extra | Status |
-|--------|-------|--------|
-| **Schwab** | `pip install brokerage-connect[schwab]` | Token-based auth via `schwab-py` |
-| **SnapTrade** | `pip install brokerage-connect[snaptrade]` | OAuth connection flow |
-| **IBKR** | `pip install brokerage-connect[ibkr]` | Gateway/TWS via `ib-async` |
-| **Plaid** | `pip install brokerage-connect[plaid]` | Investments + account APIs via `plaid-python` |
+## What It Contains
+
+| Path | Role |
+|---|---|
+| `broker_adapter.py` | Abstract `BrokerAdapter` contract used by `TradeExecutionService` |
+| `trade_objects.py` | Shared order, preview, fill, cancel, and account dataclasses |
+| `snaptrade/` | SnapTrade clients, adapters, connection helpers, recovery helpers, trading helpers |
+| `schwab/` | Schwab client and broker adapter |
+| `ibkr/` | IBKR broker adapter for trade-execution flows |
+| `plaid/` | Plaid connection and secret helpers |
+| `futures/` | Futures contract specs, notionals, pricing helpers, and source adapters |
+| `config.py` | Brokerage configuration and env loading |
+
+`core/trade_objects.py` remains as a compatibility shim that re-exports `brokerage.trade_objects`.
+
+## Supported Integrations
+
+| Integration | Package extra | What it covers |
+|---|---|---|
+| SnapTrade | `risk-module-brokerage[snaptrade]` | Connection flows, account discovery, trade preview/execute, order status |
+| Schwab | `risk-module-brokerage[schwab]` | Direct Schwab client and trade adapter |
+| IBKR | `risk-module-brokerage[ibkr]` | Trade adapter that works alongside the separate `ibkr/` package |
+| Plaid | `risk-module-brokerage[plaid]` | Connection-oriented helpers and secrets support |
 
 ## Install
 
 ```bash
-pip install brokerage-connect
-
-# With broker-specific dependencies:
-pip install brokerage-connect[schwab]
-pip install brokerage-connect[schwab,ibkr]
-pip install brokerage-connect[plaid]
+pip install risk-module-brokerage
+pip install "risk-module-brokerage[snaptrade]"
+pip install "risk-module-brokerage[schwab,ibkr]"
 ```
 
-## Quick Start
+## Public Exports
 
-```python
-from brokerage import BrokerAdapter
+The package exports:
 
-# Every broker adapter implements the same interface:
-class MyBroker(BrokerAdapter):
-    provider_name = "my_broker"
+- `BrokerAdapter`
+- broker/order dataclasses such as `BrokerAccount`, `OrderPreview`, `OrderResult`, `OrderStatus`, `CancelResult`
+- trade-preview and trade-execution result objects
 
-    def owns_account(self, account_id: str) -> bool: ...
-    def list_accounts(self): ...
-    def search_symbol(self, account_id, ticker): ...
-    def preview_order(self, account_id, ticker, side, quantity, order_type, time_in_force, **kw): ...
-    def place_order(self, account_id, order_params): ...
-    def get_orders(self, account_id, state="all", days=30): ...
-    def cancel_order(self, account_id, order_id): ...
-    def get_account_balance(self, account_id): ...
-    def refresh_after_trade(self, account_id): ...
-```
+## How It Fits The Repo
 
-## Architecture
+- `services/trade_execution_service.py` is the main consumer of the `BrokerAdapter` interface.
+- The REST and MCP trading surfaces call into the service layer, which then uses these adapters.
+- The separate `ibkr/` package covers market-data and account tooling; `brokerage/ibkr/adapter.py` is specifically the trade-execution side.
 
-- **`BrokerAdapter`** — abstract base class defining the trade interface
-- **`trade_objects`** — shared dataclasses (`OrderResult`, `OrderPreview`, `OrderStatus`, etc.)
-- **`schwab/`**, **`snaptrade/`**, **`ibkr/`**, **`plaid/`** — broker/provider integrations
-- **`config.py`** — broker configuration and credential loading via environment variables
+## Notes
 
-## License
-
-MIT
+- This package is an extracted subsystem inside the monorepo, not the full application surface by itself.
+- For the higher-level trading APIs and MCP tools, see `docs/interfaces/api.md`, `docs/interfaces/mcp.md`, and `mcp_tools/README.md`.

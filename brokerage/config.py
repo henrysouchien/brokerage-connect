@@ -14,6 +14,8 @@ SCHWAB_APP_KEY: str = os.getenv("SCHWAB_APP_KEY", "")
 SCHWAB_APP_SECRET: str = os.getenv("SCHWAB_APP_SECRET", "")
 SCHWAB_TOKEN_PATH: str = os.path.expanduser(os.getenv("SCHWAB_TOKEN_PATH", "~/.schwab_token.json"))
 SCHWAB_CALLBACK_URL: str = os.getenv("SCHWAB_CALLBACK_URL", "https://127.0.0.1:8182")
+SCHWAB_SSL_CERT_PATH: str = os.path.expanduser("~/.schwab_auth/127.0.0.1.pem")
+SCHWAB_SSL_KEY_PATH: str = os.path.expanduser("~/.schwab_auth/127.0.0.1-key.pem")
 
 SNAPTRADE_CLIENT_ID: str = os.getenv("SNAPTRADE_CLIENT_ID", "")
 SNAPTRADE_CONSUMER_KEY: str = os.getenv("SNAPTRADE_CONSUMER_KEY", "")

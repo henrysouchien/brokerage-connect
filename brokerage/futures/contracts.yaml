@@ -6,179 +6,213 @@ contracts:
     currency: USD
     exchange: CME
     asset_class: equity_index
-    fmp_symbol: ESUSD
+    data_symbol: ESUSD
+    margin_rate: 0.065
   MES:
     multiplier: 5
     tick_size: 0.25
     currency: USD
     exchange: CME
     asset_class: equity_index
-    fmp_symbol: ESUSD
+    data_symbol: ESUSD
+    margin_rate: 0.065
   NQ:
     multiplier: 20
     tick_size: 0.25
     currency: USD
     exchange: CME
     asset_class: equity_index
-    fmp_symbol: NQUSD
+    data_symbol: NQUSD
+    margin_rate: 0.065
   MNQ:
     multiplier: 2
     tick_size: 0.25
     currency: USD
     exchange: CME
     asset_class: equity_index
-    fmp_symbol: NQUSD
+    data_symbol: NQUSD
+    margin_rate: 0.065
   YM:
     multiplier: 5
     tick_size: 1.0
     currency: USD
     exchange: CBOT
     asset_class: equity_index
-    fmp_symbol: YMUSD
+    data_symbol: YMUSD
+    margin_rate: 0.065
   RTY:
     multiplier: 50
     tick_size: 0.10
     currency: USD
     exchange: CME
     asset_class: equity_index
-    fmp_symbol: RTYUSD
+    data_symbol: RTYUSD
+    margin_rate: 0.065
   NKD:
     multiplier: 5
     tick_size: 5.0
     currency: USD
     exchange: CME
     asset_class: equity_index
-    fmp_symbol: "^N225"
+    data_symbol: "^N225"
+    margin_rate: 0.08
   MNK:
     multiplier: 0.5
     tick_size: 5.0
     currency: USD
     exchange: CME
     asset_class: equity_index
-    fmp_symbol: "^N225"
+    data_symbol: "^N225"
+    margin_rate: 0.08
   NIY:
     multiplier: 500
     tick_size: 5.0
     currency: JPY
     exchange: CME
     asset_class: equity_index
-    fmp_symbol: "^N225"
+    data_symbol: "^N225"
+    margin_rate: 0.09
   ESTX50:
     multiplier: 10
     tick_size: 1.0
     currency: EUR
     exchange: EUREX
     asset_class: equity_index
-    fmp_symbol: "^STOXX50E"
+    data_symbol: "^STOXX50E"
+    margin_rate: 0.06
   DAX:
     multiplier: 25
     tick_size: 1.0
     currency: EUR
     exchange: EUREX
     asset_class: equity_index
-    fmp_symbol: "^GDAXI"
+    data_symbol: "^GDAXI"
+    margin_rate: 0.07
   Z:
     multiplier: 10
     tick_size: 0.5
     currency: GBP
     exchange: ICEEU
     asset_class: equity_index
-    fmp_symbol: "^FTSE"
+    data_symbol: "^FTSE"
+    margin_rate: 0.10
   HSI:
     multiplier: 50
     tick_size: 1.0
     currency: HKD
     exchange: HKFE
     asset_class: equity_index
-    fmp_symbol: "^HSI"
+    data_symbol: "^HSI"
+    margin_rate: 0.09
+  MHI:
+    multiplier: 10
+    tick_size: 1.0
+    currency: HKD
+    exchange: HKFE
+    asset_class: equity_index
+    data_symbol: "^HSI"
+    margin_rate: 0.09
   GC:
     multiplier: 100
     tick_size: 0.10
     currency: USD
     exchange: COMEX
     asset_class: metals
-    fmp_symbol: GCUSD
+    data_symbol: GCUSD
+    margin_rate: 0.05
   MGC:
     multiplier: 10
     tick_size: 0.10
     currency: USD
     exchange: COMEX
     asset_class: metals
-    fmp_symbol: MGCUSD
+    data_symbol: MGCUSD
+    margin_rate: 0.05
   SI:
     multiplier: 5000
     tick_size: 0.005
     currency: USD
     exchange: COMEX
     asset_class: metals
-    fmp_symbol: SIUSD
+    data_symbol: SIUSD
+    margin_rate: 0.12
   HG:
     multiplier: 25000
     tick_size: 0.0005
     currency: USD
     exchange: COMEX
     asset_class: metals
-    fmp_symbol: HGUSD
+    data_symbol: HGUSD
+    margin_rate: 0.07
   PL:
     multiplier: 50
     tick_size: 0.10
     currency: USD
     exchange: NYMEX
     asset_class: metals
-    fmp_symbol: PLUSD
+    data_symbol: PLUSD
+    margin_rate: 0.07
   PA:
     multiplier: 100
     tick_size: 0.05
     currency: USD
     exchange: NYMEX
     asset_class: metals
-    fmp_symbol: PAUSD
+    data_symbol: PAUSD
+    margin_rate: 0.20
   CL:
     multiplier: 1000
     tick_size: 0.01
     currency: USD
     exchange: NYMEX
     asset_class: energy
-    fmp_symbol: CLUSD
+    data_symbol: CLUSD
+    margin_rate: 0.07
   BZ:
     multiplier: 1000
     tick_size: 0.01
     currency: USD
     exchange: NYMEX
     asset_class: energy
-    fmp_symbol: BZUSD
+    data_symbol: BZUSD
+    margin_rate: 0.08
   NG:
     multiplier: 10000
     tick_size: 0.001
     currency: USD
     exchange: NYMEX
     asset_class: energy
-    fmp_symbol: NGUSD
+    data_symbol: NGUSD
+    margin_rate: 0.16
   ZB:
     multiplier: 1000
     tick_size: 0.03125
     currency: USD
     exchange: CBOT
     asset_class: fixed_income
-    fmp_symbol: ZBUSD
+    data_symbol: ZBUSD
+    margin_rate: 0.04
   ZN:
     multiplier: 1000
     tick_size: 0.015625
     currency: USD
     exchange: CBOT
     asset_class: fixed_income
-    fmp_symbol: ZNUSD
+    data_symbol: ZNUSD
+    margin_rate: 0.02
   ZF:
     multiplier: 1000
     tick_size: 0.0078125
     currency: USD
     exchange: CBOT
     asset_class: fixed_income
-    fmp_symbol: ZFUSD
+    data_symbol: ZFUSD
+    margin_rate: 0.01
   ZT:
     multiplier: 2000
     tick_size: 0.00390625
     currency: USD
     exchange: CBOT
     asset_class: fixed_income
-    fmp_symbol: ZTUSD
+    data_symbol: ZTUSD
+    margin_rate: 0.005

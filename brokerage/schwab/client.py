@@ -2,27 +2,40 @@
 
 from __future__ import annotations
 
+import functools
 import importlib.machinery
 import importlib.util
 import json
 import os
 import sys
+import time
 import types
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from app_platform.api_budget import guard_call
 from brokerage._logging import portfolio_logger
 from brokerage.config import (
     SCHWAB_APP_KEY,
     SCHWAB_APP_SECRET,
     SCHWAB_CALLBACK_URL,
+    SCHWAB_SSL_CERT_PATH,
+    SCHWAB_SSL_KEY_PATH,
     SCHWAB_TOKEN_PATH,
 )
+from config.api_budget_costs import COST_PER_CALL
 
 
-_client_cache: Any = None
 _account_hash_cache: dict[str, str] | None = None
+_invalid_grant_cache: tuple[float, str] | None = None
+_original_server_fn: Any = None
+_INVALID_GRANT_TTL_SECONDS = 300.0
+_RELOGIN_REQUIRED_MESSAGE = (
+    "Schwab refresh token appears expired. Re-authenticate with: "
+    "`python3 -m scripts.run_schwab login`"
+)
+_REFRESH_TOKEN_MAX_AGE = timedelta(days=7)
 
 
 class _NoopLogRedactor:
@@ -55,8 +68,10 @@ def _load_schwab_auth_module() -> Any:
         pkg_module.__spec__ = importlib.machinery.ModuleSpec(
             name=pkg_name,
             loader=None,
+            origin=str(pkg_dir / "__init__.py"),
             is_package=True,
         )
+        pkg_module.__spec__.submodule_search_locations = [str(pkg_dir)]
         pkg_module.LOG_REDACTOR = _NoopLogRedactor()
         sys.modules[pkg_name] = pkg_module
 
@@ -96,6 +111,30 @@ def _load_json_response(response: Any) -> Any:
     return None
 
 
+def _response_as_dict(response: Any) -> dict[str, Any]:
+    payload = _load_json_response(response)
+    if isinstance(payload, dict):
+        result = dict(payload)
+    elif payload is None:
+        result = {}
+    else:
+        result = {"payload": payload}
+
+    status_code = getattr(response, "status_code", None)
+    if isinstance(status_code, int) and "status_code" not in result:
+        result["status_code"] = status_code
+
+    headers = getattr(response, "headers", None)
+    if isinstance(headers, dict) and headers and "headers" not in result:
+        result["headers"] = dict(headers)
+
+    return result
+
+
+def _schwab_cost_per_call(operation: str) -> Any:
+    return COST_PER_CALL.get(("schwab", operation), 0)
+
+
 def is_invalid_grant_error(exc: Exception) -> bool:
     name = exc.__class__.__name__.lower()
     message = str(exc).lower()
@@ -109,10 +148,63 @@ def is_invalid_grant_error(exc: Exception) -> bool:
 
 
 def _raise_relogin_required(exc: Exception) -> None:
-    raise RuntimeError(
-        "Schwab refresh token appears expired. Re-authenticate with: "
-        "`python3 run_schwab.py login`"
-    ) from exc
+    raise RuntimeError(_RELOGIN_REQUIRED_MESSAGE) from exc
+
+
+def _get_cached_invalid_grant_message(force_refresh: bool = False) -> str | None:
+    global _invalid_grant_cache
+
+    if force_refresh or _invalid_grant_cache is None:
+        return None
+
+    cached_at, message = _invalid_grant_cache
+    if (time.monotonic() - cached_at) >= _INVALID_GRANT_TTL_SECONDS:
+        _invalid_grant_cache = None
+        return None
+
+    return message
+
+
+def _cache_invalid_grant() -> None:
+    global _invalid_grant_cache
+    _invalid_grant_cache = (time.monotonic(), _RELOGIN_REQUIRED_MESSAGE)
+
+
+def _token_written_at() -> datetime | None:
+    token_path = _token_path()
+    if not os.path.exists(token_path):
+        return None
+
+    try:
+        written_at = datetime.fromtimestamp(os.path.getmtime(token_path), tz=UTC)
+    except Exception:
+        written_at = None
+
+    try:
+        with open(token_path, "r", encoding="utf-8") as handle:
+            token_blob = json.load(handle)
+    except Exception:
+        token_blob = {}
+
+    blob_ts = token_blob.get("creation_timestamp") if isinstance(token_blob, dict) else None
+    if blob_ts is not None:
+        try:
+            blob_dt = datetime.fromtimestamp(float(blob_ts), tz=UTC)
+            if written_at is None or blob_dt > written_at:
+                written_at = blob_dt
+        except Exception:
+            pass
+
+    return written_at
+
+
+def _refresh_token_expired_by_file_age(now: datetime | None = None) -> bool:
+    written_at = _token_written_at()
+    if written_at is None:
+        return False
+    if now is None:
+        now = datetime.now(tz=UTC)
+    return (now - written_at) >= _REFRESH_TOKEN_MAX_AGE
 
 
 def _client_from_token_file() -> Any:
@@ -122,7 +214,7 @@ def _client_from_token_file() -> Any:
     token_path = _token_path()
     if not os.path.exists(token_path):
         raise FileNotFoundError(
-            f"Schwab token file not found at {token_path}. Run `python3 run_schwab.py login`."
+            f"Schwab token file not found at {token_path}. Run `python3 -m scripts.run_schwab login`."
         )
 
     auth = _load_schwab_auth_module()
@@ -139,20 +231,148 @@ def _client_from_token_file() -> Any:
         return auth.client_from_token_file(token_path, SCHWAB_APP_KEY, SCHWAB_APP_SECRET)
 
 
+@functools.lru_cache(maxsize=1)
+def _get_or_create_client() -> Any:
+    return _client_from_token_file()
+
+
 def get_schwab_client(force_refresh: bool = False) -> Any:
     """Return an authenticated schwab-py client (auto-refresh handled by schwab-py)."""
-    global _client_cache
+    global _invalid_grant_cache
 
-    if _client_cache is not None and not force_refresh:
-        return _client_cache
+    cached_invalid_message = _get_cached_invalid_grant_message(force_refresh=force_refresh)
+    if cached_invalid_message is not None:
+        raise RuntimeError(cached_invalid_message)
+
+    if not force_refresh and _refresh_token_expired_by_file_age():
+        _cache_invalid_grant()
+        raise RuntimeError(_RELOGIN_REQUIRED_MESSAGE)
 
     try:
-        _client_cache = _client_from_token_file()
-        return _client_cache
+        if force_refresh:
+            _get_or_create_client.cache_clear()
+        client = _get_or_create_client()
+        _invalid_grant_cache = None
+        return client
     except Exception as exc:
         if is_invalid_grant_error(exc):
+            _cache_invalid_grant()
             _raise_relogin_required(exc)
         raise
+
+
+def _call_client_method(func: Any, /, *args: Any, **kwargs: Any) -> Any:
+    try:
+        return func(*args, **kwargs)
+    except Exception as exc:
+        if is_invalid_grant_error(exc):
+            _cache_invalid_grant()
+            _raise_relogin_required(exc)
+        raise
+
+
+def _call_schwab_get_account(client: Any, account_hash: str, fields: list[str] | None = None) -> Any:
+    try:
+        return (
+            _call_client_method(client.get_account, account_hash, fields=fields)
+            if fields
+            else _call_client_method(client.get_account, account_hash)
+        )
+    except TypeError:
+        return _call_client_method(client.get_account, account_hash)
+
+
+def _call_schwab_get_transactions(
+    client: Any,
+    account_hash: str,
+    *,
+    start_date: date,
+    end_date: date,
+) -> Any:
+    try:
+        return _call_client_method(
+            client.get_transactions,
+            account_hash,
+            start_date=start_date,
+            end_date=end_date,
+        )
+    except TypeError:
+        return _call_client_method(client.get_transactions, account_hash, start_date, end_date)
+
+
+def _call_schwab_get_orders_for_account(
+    client: Any,
+    account_hash: str,
+    *,
+    start: datetime,
+    end: datetime,
+) -> Any:
+    try:
+        return _call_client_method(client.get_orders_for_account, account_hash, start, end)
+    except TypeError:
+        return _call_client_method(client.get_orders_for_account, account_hash)
+
+
+def _call_schwab_cancel_order(client: Any, account_hash: str, order_id: str) -> Any:
+    try:
+        return _call_client_method(client.cancel_order, order_id, account_hash)
+    except TypeError:
+        return _call_client_method(client.cancel_order, account_hash, order_id)
+
+
+def _apply_mkcert_ssl_patch(auth_module: Any) -> None:
+    global _original_server_fn
+
+    if _original_server_fn is None:
+        _original_server_fn = getattr(auth_module, "__run_client_from_login_flow_server")
+
+    cert_path = SCHWAB_SSL_CERT_PATH
+    key_path = SCHWAB_SSL_KEY_PATH
+    if not os.path.exists(cert_path) or not os.path.exists(key_path):
+        setattr(auth_module, "__run_client_from_login_flow_server", _original_server_fn)
+        portfolio_logger.warning(
+            "Schwab SSL cert/key not found at %s and %s. Falling back to schwab-py's adhoc cert. "
+            "Run `python3 -m scripts.run_schwab setup-ssl`.",
+            cert_path,
+            key_path,
+        )
+        return
+
+    # This runs in a separate process and is invisible to coverage
+    def _patched_server(q: Any, callback_port: int, callback_path: str) -> None:  # pragma: no cover
+        """Helper server for intercepting redirects to the callback URL.
+
+        See client_from_login_flow for details.
+        """
+        import flask
+
+        app = flask.Flask(__name__)
+
+        @app.route(callback_path)
+        def handle_token() -> str:
+            q.put(flask.request.url)
+            return "schwab-py callback received! You may now close this window/tab."
+
+        @app.route("/schwab-py-internal/status")
+        def status() -> str:
+            return "running"
+
+        if callback_port == 443:
+            return
+
+        # Wrap this call in some hackery to suppress the flask startup messages
+        with open(os.devnull, "w") as devnull:
+            import logging
+
+            log = logging.getLogger("werkzeug")
+            log.setLevel(logging.ERROR)
+
+            old_stdout = sys.stdout
+            sys.stdout = devnull
+            app.run(port=callback_port, ssl_context=(cert_path, key_path))
+            sys.stdout = old_stdout
+
+    setattr(auth_module, "__run_client_from_login_flow_server", _patched_server)
 
 
 def schwab_login(manual: bool = False) -> Any:
@@ -179,21 +399,23 @@ def schwab_login(manual: bool = False) -> Any:
         portfolio_logger.info("Removed stale token file before re-login: %s", token_path)
 
     auth = _load_schwab_auth_module()
+    _apply_mkcert_ssl_patch(auth)
 
     # Clear cached client so next get_schwab_client() loads the fresh token.
-    global _client_cache
-    _client_cache = None
+    global _invalid_grant_cache
+    _invalid_grant_cache = None
+    _get_or_create_client.cache_clear()
 
     if manual:
         try:
-            _client_cache = auth.client_from_manual_flow(
+            client = auth.client_from_manual_flow(
                 api_key=SCHWAB_APP_KEY,
                 app_secret=SCHWAB_APP_SECRET,
                 callback_url=SCHWAB_CALLBACK_URL,
                 token_path=token_path,
             )
         except TypeError:
-            _client_cache = auth.client_from_manual_flow(
+            client = auth.client_from_manual_flow(
                 SCHWAB_APP_KEY,
                 SCHWAB_APP_SECRET,
                 SCHWAB_CALLBACK_URL,
@@ -201,23 +423,27 @@ def schwab_login(manual: bool = False) -> Any:
             )
     else:
         try:
-            _client_cache = auth.client_from_login_flow(
+            client = auth.client_from_login_flow(
                 api_key=SCHWAB_APP_KEY,
                 app_secret=SCHWAB_APP_SECRET,
                 callback_url=SCHWAB_CALLBACK_URL,
                 token_path=token_path,
             )
         except TypeError:
-            _client_cache = auth.client_from_login_flow(
+            client = auth.client_from_login_flow(
                 SCHWAB_APP_KEY,
                 SCHWAB_APP_SECRET,
                 SCHWAB_CALLBACK_URL,
                 token_path,
             )
-    return _client_cache
+    return client
 
 
-def get_account_hashes(force_refresh: bool = False) -> dict[str, str]:
+def get_account_hashes(
+    force_refresh: bool = False,
+    *,
+    budget_user_id: int | None = None,
+) -> dict[str, str]:
     """Return cached account_number -> account_hash mapping for this process."""
     global _account_hash_cache
 
@@ -225,12 +451,14 @@ def get_account_hashes(force_refresh: bool = False) -> dict[str, str]:
         return dict(_account_hash_cache)
 
     client = get_schwab_client()
-    try:
-        response = client.get_account_numbers()
-    except Exception as exc:
-        if is_invalid_grant_error(exc):
-            _raise_relogin_required(exc)
-        raise
+    response = guard_call(
+        provider="schwab",
+        operation="get_account_numbers",
+        budget_user_id=budget_user_id,
+        cost_per_call=_schwab_cost_per_call("get_account_numbers"),
+        fn=_call_client_method,
+        args=(client.get_account_numbers,),
+    )
 
     payload = _load_json_response(response)
     rows = payload if isinstance(payload, list) else []
@@ -248,6 +476,178 @@ def get_account_hashes(force_refresh: bool = False) -> dict[str, str]:
     return dict(mapping)
 
 
+def get_account_data(
+    account_hash: str,
+    *,
+    fields: list[str] | None = None,
+    budget_user_id: int | None = None,
+) -> dict[str, Any]:
+    """Return one account payload as a plain dict."""
+    client = get_schwab_client()
+    response = guard_call(
+        provider="schwab",
+        operation="get_account",
+        budget_user_id=budget_user_id,
+        cost_per_call=_schwab_cost_per_call("get_account"),
+        fn=_call_schwab_get_account,
+        args=(client, account_hash),
+        kwargs={"fields": fields},
+    )
+    payload = _load_json_response(response)
+    return payload if isinstance(payload, dict) else {}
+
+
+def get_transactions(
+    account_hash: str,
+    *,
+    start_date: date,
+    end_date: date,
+    budget_user_id: int | None = None,
+) -> list[dict[str, Any]]:
+    """Return account transaction rows as plain dicts."""
+    client = get_schwab_client()
+    response = guard_call(
+        provider="schwab",
+        operation="get_transactions",
+        budget_user_id=budget_user_id,
+        cost_per_call=_schwab_cost_per_call("get_transactions"),
+        fn=_call_schwab_get_transactions,
+        args=(client, account_hash),
+        kwargs={
+            "start_date": start_date,
+            "end_date": end_date,
+        },
+    )
+    payload = _load_json_response(response)
+    return [row for row in payload if isinstance(row, dict)] if isinstance(payload, list) else []
+
+
+def get_quotes(symbols: list[str], *, budget_user_id: int | None = None) -> dict[str, Any]:
+    """Return multi-symbol quote payload keyed by symbol."""
+    if not symbols:
+        return {}
+    client = get_schwab_client()
+    response = guard_call(
+        provider="schwab",
+        operation="get_quotes",
+        budget_user_id=budget_user_id,
+        cost_per_call=_schwab_cost_per_call("get_quotes"),
+        fn=_call_client_method,
+        args=(client.get_quotes, symbols),
+    )
+    payload = _load_json_response(response)
+    return payload if isinstance(payload, dict) else {}
+
+
+def get_quote(symbol: str, *, budget_user_id: int | None = None) -> dict[str, Any] | None:
+    """Return one quote row when available."""
+    normalized_symbol = str(symbol or "").upper().strip()
+    if not normalized_symbol:
+        return None
+    client = get_schwab_client()
+    response = guard_call(
+        provider="schwab",
+        operation="get_quote",
+        budget_user_id=budget_user_id,
+        cost_per_call=_schwab_cost_per_call("get_quote"),
+        fn=_call_client_method,
+        args=(client.get_quote, normalized_symbol),
+    )
+    payload = _load_json_response(response)
+    if not isinstance(payload, dict):
+        return None
+    if isinstance(payload.get(normalized_symbol), dict):
+        return payload[normalized_symbol]
+    return payload
+
+
+def search_instruments(
+    symbol: str,
+    *,
+    projection: str = "symbol-search",
+    budget_user_id: int | None = None,
+) -> dict[str, Any]:
+    """Return search payload for a symbol lookup."""
+    normalized_symbol = str(symbol or "").upper().strip()
+    if not normalized_symbol:
+        return {}
+    client = get_schwab_client()
+    response = guard_call(
+        provider="schwab",
+        operation="search_instruments",
+        budget_user_id=budget_user_id,
+        cost_per_call=_schwab_cost_per_call("search_instruments"),
+        fn=_call_client_method,
+        args=(client.search_instruments, normalized_symbol),
+        kwargs={"projection": projection},
+    )
+    payload = _load_json_response(response)
+    return payload if isinstance(payload, dict) else {}
+
+
+def get_orders_for_account(
+    account_hash: str,
+    *,
+    start: datetime,
+    end: datetime,
+    budget_user_id: int | None = None,
+) -> list[dict[str, Any]]:
+    """Return account order rows as plain dicts."""
+    client = get_schwab_client()
+    response = guard_call(
+        provider="schwab",
+        operation="get_orders_for_account",
+        budget_user_id=budget_user_id,
+        cost_per_call=_schwab_cost_per_call("get_orders_for_account"),
+        fn=_call_schwab_get_orders_for_account,
+        args=(client, account_hash),
+        kwargs={
+            "start": start,
+            "end": end,
+        },
+    )
+    payload = _load_json_response(response)
+    return [row for row in payload if isinstance(row, dict)] if isinstance(payload, list) else []
+
+
+def cancel_order(
+    account_hash: str,
+    order_id: str,
+    *,
+    budget_user_id: int | None = None,
+) -> dict[str, Any]:
+    """Cancel an order and return the normalized response payload."""
+    client = get_schwab_client()
+    response = guard_call(
+        provider="schwab",
+        operation="cancel_order",
+        budget_user_id=budget_user_id,
+        cost_per_call=_schwab_cost_per_call("cancel_order"),
+        fn=_call_schwab_cancel_order,
+        args=(client, account_hash, order_id),
+    )
+    return _response_as_dict(response)
+
+
+def place_order(
+    account_hash: str,
+    order_spec: dict[str, Any],
+    *,
+    budget_user_id: int | None = None,
+) -> dict[str, Any]:
+    """Submit an order and return the normalized response payload."""
+    client = get_schwab_client()
+    response = guard_call(
+        provider="schwab",
+        operation="place_order",
+        budget_user_id=budget_user_id,
+        cost_per_call=_schwab_cost_per_call("place_order"),
+        fn=_call_client_method,
+        args=(client.place_order, account_hash, order_spec),
+    )
+    return _response_as_dict(response)
+
+
 def check_token_health() -> dict[str, Any]:
     """Inspect token file and client age; warn near 7-day refresh expiry."""
     token_path = _token_path()
@@ -262,7 +662,7 @@ def check_token_health() -> dict[str, Any]:
     }
 
     if not os.path.exists(token_path):
-        health["warnings"].append("Token file missing. Run `python3 run_schwab.py login`.")
+        health["warnings"].append("Token file missing. Run `python3 -m scripts.run_schwab login`.")
         return health
 
     token_blob: dict[str, Any] = {}
@@ -287,7 +687,7 @@ def check_token_health() -> dict[str, Any]:
     except Exception as exc:
         if is_invalid_grant_error(exc):
             health["warnings"].append(
-                "Refresh token appears expired. Run `python3 run_schwab.py login`."
+                "Refresh token appears expired. Run `python3 -m scripts.run_schwab login`."
             )
             health["near_refresh_expiry"] = True
         else:
@@ -314,7 +714,7 @@ def check_token_health() -> dict[str, Any]:
         if remaining_days <= 1.0:
             health["near_refresh_expiry"] = True
             health["warnings"].append(
-                "Refresh token near expiry (<=1 day). Re-run `python3 run_schwab.py login` soon."
+                "Refresh token near expiry (<=1 day). Re-run `python3 -m scripts.run_schwab login` soon."
             )
     except Exception:
         pass
@@ -324,7 +724,8 @@ def check_token_health() -> dict[str, Any]:
 
 def invalidate_schwab_caches() -> None:
     """Clear in-memory client/hash caches."""
-    global _client_cache, _account_hash_cache
-    _client_cache = None
+    global _account_hash_cache, _invalid_grant_cache
     _account_hash_cache = None
+    _invalid_grant_cache = None
+    _get_or_create_client.cache_clear()
     portfolio_logger.info("Cleared in-memory Schwab client/account-hash cache")

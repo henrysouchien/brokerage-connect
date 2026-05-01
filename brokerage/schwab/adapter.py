@@ -14,6 +14,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
+from app_platform.api_budget import guard_call
 from brokerage._logging import portfolio_logger
 from brokerage.broker_adapter import BrokerAdapter
 from brokerage.schwab.client import (
@@ -22,7 +23,9 @@ from brokerage.schwab.client import (
     invalidate_schwab_caches,
     is_invalid_grant_error,
 )
+from brokerage.schwab.orders import build_equity_order_spec
 from brokerage.trade_objects import BrokerAccount, CancelResult, OrderPreview, OrderResult, OrderStatus
+from config.api_budget_costs import COST_PER_CALL
 
 
 SCHWAB_STATUS_MAP = {
@@ -38,6 +41,36 @@ SCHWAB_STATUS_MAP = {
 }
 
 _RETRY_DELAYS_SECONDS = (0.0, 0.5, 1.0, 2.0)
+
+
+def _schwab_cost_per_call(operation: str) -> Any:
+    return COST_PER_CALL.get(("schwab", operation), 0)
+
+
+def _call_schwab_get_account(client: Any, account_hash: str, fields: list[str] | None = None) -> Any:
+    try:
+        return client.get_account(account_hash, fields=fields) if fields else client.get_account(account_hash)
+    except TypeError:
+        return client.get_account(account_hash)
+
+
+def _call_schwab_get_orders_for_account(
+    client: Any,
+    account_hash: str,
+    start: datetime,
+    end: datetime,
+) -> Any:
+    try:
+        return client.get_orders_for_account(account_hash, start, end)
+    except TypeError:
+        return client.get_orders_for_account(account_hash)
+
+
+def _call_schwab_cancel_order(client: Any, order_id: str, account_hash: str) -> Any:
+    try:
+        return client.cancel_order(order_id, account_hash)
+    except TypeError:
+        return client.cancel_order(account_hash, order_id)
 
 
 def _to_float(value: Any) -> Optional[float]:
@@ -146,14 +179,30 @@ class SchwabBrokerAdapter(BrokerAdapter):
     def provider_name(self) -> str:
         return "schwab"
 
-    def _call_with_backoff(self, func, *args, **kwargs):
+    def _call_with_backoff(
+        self,
+        func,
+        *args,
+        operation: str | None = None,
+        budget_user_id: int | None = None,
+        **kwargs,
+    ):
         last_exception: Exception | None = None
         last_response: Any = None
+        operation_name = str(operation or getattr(func, "__name__", "") or "unknown")
         for delay in _RETRY_DELAYS_SECONDS:
             if delay > 0:
                 time.sleep(delay)
             try:
-                response = func(*args, **kwargs)
+                response = guard_call(
+                    provider="schwab",
+                    operation=operation_name,
+                    budget_user_id=budget_user_id,
+                    cost_per_call=_schwab_cost_per_call(operation_name),
+                    fn=func,
+                    args=args,
+                    kwargs=kwargs,
+                )
                 last_response = response
                 if getattr(response, "status_code", None) == 429:
                     continue
@@ -161,7 +210,7 @@ class SchwabBrokerAdapter(BrokerAdapter):
             except Exception as exc:
                 if is_invalid_grant_error(exc):
                     raise RuntimeError(
-                        "Schwab refresh token expired. Run `python3 run_schwab.py login`."
+                        "Schwab refresh token expired. Run `python3 -m scripts.run_schwab login`."
                     ) from exc
                 text = str(exc).lower()
                 if "429" in text or "rate limit" in text:
@@ -197,20 +246,20 @@ class SchwabBrokerAdapter(BrokerAdapter):
 
     def _fetch_account(self, account_hash: str, fields: Optional[list[str]] = None) -> dict[str, Any]:
         client = get_schwab_client()
-        if fields:
-            try:
-                response = self._call_with_backoff(client.get_account, account_hash, fields=fields)
-            except TypeError:
-                response = self._call_with_backoff(client.get_account, account_hash)
-        else:
-            response = self._call_with_backoff(client.get_account, account_hash)
+        response = self._call_with_backoff(
+            _call_schwab_get_account,
+            client,
+            account_hash,
+            fields=fields,
+            operation="get_account",
+        )
         payload = _response_payload(response)
         return payload if isinstance(payload, dict) else {}
 
     def _quote_price(self, ticker: str) -> Optional[float]:
         client = get_schwab_client()
         symbol = str(ticker).upper().strip()
-        response = self._call_with_backoff(client.get_quote, symbol)
+        response = self._call_with_backoff(client.get_quote, symbol, operation="get_quote")
         payload = _response_payload(response)
         if not isinstance(payload, dict):
             return None
@@ -233,6 +282,13 @@ class SchwabBrokerAdapter(BrokerAdapter):
             return "BUY"
         if side_upper == "SELL":
             return "SELL"
+        if side_upper == "COVER":
+            return "BUY_TO_COVER"
+        if side_upper == "SHORT":
+            raise ValueError(
+                "Schwab SHORT orders require adapter routing changes not yet implemented. "
+                "Use an IBKR account for short selling."
+            )
         raise ValueError(f"Unsupported side: {side}")
 
     def _duration_for_tif(self, time_in_force: str) -> str:
@@ -295,28 +351,17 @@ class SchwabBrokerAdapter(BrokerAdapter):
 
         # Prefer schwab.orders builders when available.
         try:
-            from schwab.orders import equities
-
-            side_upper = str(side or "").upper().strip()
-            qty = float(quantity)
-            sym = str(ticker).upper().strip()
-            limit_price_str = _format_price(limit_price)
-            stop_price_str = _format_price(stop_price)
-            if mapped_type == "MARKET":
-                builder = equities.equity_buy_market(sym, qty) if side_upper == "BUY" else equities.equity_sell_market(sym, qty)
-            elif mapped_type == "LIMIT":
-                builder = equities.equity_buy_limit(sym, qty, limit_price_str) if side_upper == "BUY" else equities.equity_sell_limit(sym, qty, limit_price_str)
-            elif mapped_type == "STOP":
-                builder = equities.equity_buy_stop(sym, qty, stop_price_str) if side_upper == "BUY" else equities.equity_sell_stop(sym, qty, stop_price_str)
-            else:
-                builder = equities.equity_buy_stop_limit(sym, qty, stop_price_str, limit_price_str) if side_upper == "BUY" else equities.equity_sell_stop_limit(sym, qty, stop_price_str, limit_price_str)
-
-            if hasattr(builder, "set_duration"):
-                builder.set_duration(duration)
-            if hasattr(builder, "build"):
-                built = builder.build()
-                if isinstance(built, dict):
-                    return built
+            built = build_equity_order_spec(
+                ticker=ticker,
+                side=side,
+                quantity=quantity,
+                mapped_type=mapped_type,
+                duration=duration,
+                limit_price=_format_price(limit_price),
+                stop_price=_format_price(stop_price),
+            )
+            if built is not None:
+                return built
         except Exception:
             pass
 
@@ -378,7 +423,12 @@ class SchwabBrokerAdapter(BrokerAdapter):
         client = get_schwab_client()
         instrument_data: dict[str, Any] = {}
         try:
-            response = self._call_with_backoff(client.search_instruments, symbol, projection="symbol-search")
+            response = self._call_with_backoff(
+                client.search_instruments,
+                symbol,
+                projection="symbol-search",
+                operation="search_instruments",
+            )
             payload = _response_payload(response)
             if isinstance(payload, dict):
                 instrument_data = payload.get(symbol) or {}
@@ -417,6 +467,15 @@ class SchwabBrokerAdapter(BrokerAdapter):
         symbol = str(symbol_id or ticker or "").upper().strip()
         if not symbol:
             raise ValueError("ticker is required")
+
+        side_upper = str(side or "").upper().strip()
+        if side_upper == "SHORT":
+            raise ValueError(
+                "Schwab SHORT orders require adapter routing changes not yet implemented. "
+                "Use an IBKR account for short selling."
+            )
+        if side_upper == "COVER":
+            side = "COVER"
 
         if limit_price is not None:
             estimated_price = float(limit_price)
@@ -482,7 +541,18 @@ class SchwabBrokerAdapter(BrokerAdapter):
         )
 
         client = get_schwab_client()
-        response = self._call_with_backoff(client.place_order, account_hash, order_spec)
+        response = self._call_with_backoff(
+            client.place_order,
+            account_hash,
+            order_spec,
+            operation="place_order",
+        )
+        status_code = getattr(response, "status_code", None)
+        if status_code is not None and status_code >= 400:
+            payload = _response_payload(response)
+            raise RuntimeError(
+                f"Schwab order placement failed (HTTP {status_code}): {payload}"
+            )
         payload = _response_payload(response)
         brokerage_order_id = _extract_order_id(response, payload)
         status = _status_from_response(response)
@@ -517,10 +587,14 @@ class SchwabBrokerAdapter(BrokerAdapter):
         start = end - timedelta(days=max(int(days), 1))
         client = get_schwab_client()
 
-        try:
-            response = self._call_with_backoff(client.get_orders_for_account, account_hash, start, end)
-        except TypeError:
-            response = self._call_with_backoff(client.get_orders_for_account, account_hash)
+        response = self._call_with_backoff(
+            _call_schwab_get_orders_for_account,
+            client,
+            account_hash,
+            start,
+            end,
+            operation="get_orders_for_account",
+        )
 
         payload = _response_payload(response)
         orders = payload if isinstance(payload, list) else []
@@ -572,12 +646,20 @@ class SchwabBrokerAdapter(BrokerAdapter):
     ) -> CancelResult:
         account_hash = self._resolve_account_hash(account_id)
         client = get_schwab_client()
-        try:
-            response = self._call_with_backoff(client.cancel_order, order_id, account_hash)
-        except TypeError:
-            response = self._call_with_backoff(client.cancel_order, account_hash, order_id)
+        response = self._call_with_backoff(
+            _call_schwab_cancel_order,
+            client,
+            order_id,
+            account_hash,
+            operation="cancel_order",
+        )
 
         status_code = getattr(response, "status_code", None)
+        if status_code is not None and status_code >= 400:
+            payload = _response_payload(response)
+            raise RuntimeError(
+                f"Schwab order cancellation failed (HTTP {status_code}): {payload}"
+            )
         status = "CANCELED" if status_code in {200, 201, 202, 204} else "CANCEL_PENDING"
         payload = _response_payload(response)
         broker_data: Optional[Dict[str, Any]] = None

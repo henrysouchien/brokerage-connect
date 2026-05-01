@@ -37,7 +37,8 @@ class FuturesContractSpec:
     currency: str
     exchange: str
     asset_class: FuturesAssetClass
-    fmp_symbol: Optional[str] = None
+    data_symbol: Optional[str] = None
+    margin_rate: float = 0.10
 
     @property
     def tick_value(self) -> float:
@@ -66,6 +67,7 @@ class FuturesContractSpec:
             "currency": self.currency,
             "exchange": self.exchange,
             "asset_class": self.asset_class,
+            "margin_rate": self.margin_rate,
         }
 
 
@@ -82,41 +84,82 @@ def _load_contracts_yaml() -> Dict[str, Any]:
     return contracts
 
 
-def load_contract_specs() -> Dict[str, FuturesContractSpec]:
-    """Load all contract specs from the canonical contracts catalog."""
-    catalog = _load_contracts_yaml()
-    specs: Dict[str, FuturesContractSpec] = {}
+def _build_contract_spec(symbol: str, meta: Dict[str, Any], source_name: str) -> FuturesContractSpec:
+    if not isinstance(meta, dict):
+        raise ValueError(f"Invalid contract spec entry for symbol: {symbol}")
 
+    key = str(symbol or meta.get("symbol") or "").strip().upper()
+    if not key:
+        raise ValueError(f"Missing symbol in {source_name} contract catalog entry")
+
+    asset_class_raw = str(meta.get("asset_class") or "").strip()
+    if not asset_class_raw:
+        raise ValueError(f"Missing asset_class in {source_name} for symbol: {key}")
+    if asset_class_raw not in _VALID_ASSET_CLASSES:
+        raise ValueError(
+            f"Invalid asset_class '{asset_class_raw}' in {source_name} for symbol: {key}"
+        )
+
+    data_symbol_raw = (
+        meta.get("data_symbol")
+        if "data_symbol" in meta
+        else meta.get("fmp_symbol")
+    )
+    data_symbol = str(data_symbol_raw).strip().upper() if data_symbol_raw else None
+
+    return FuturesContractSpec(
+        symbol=key,
+        multiplier=float(meta["multiplier"]),
+        tick_size=float(meta["tick_size"]),
+        currency=str(meta["currency"]),
+        exchange=str(meta["exchange"]),
+        asset_class=cast(FuturesAssetClass, asset_class_raw),
+        data_symbol=data_symbol,
+        margin_rate=float(meta.get("margin_rate", 0.10)),
+    )
+
+
+def _parse_catalog(catalog: Dict[str, Any]) -> Dict[str, FuturesContractSpec]:
+    """Parse YAML contract catalog into dataclass instances."""
+    specs: Dict[str, FuturesContractSpec] = {}
     for symbol, meta in catalog.items():
         if not isinstance(meta, dict):
             raise ValueError(f"Invalid contracts catalog entry for symbol: {symbol}")
 
-        key = str(symbol or "").strip().upper()
-        if not key:
-            continue
-
-        asset_class_raw = str(meta.get("asset_class") or "").strip()
-        if not asset_class_raw:
-            raise ValueError(f"Missing asset_class in contracts.yaml for symbol: {key}")
-        if asset_class_raw not in _VALID_ASSET_CLASSES:
-            raise ValueError(
-                f"Invalid asset_class '{asset_class_raw}' in contracts.yaml for symbol: {key}"
-            )
-
-        fmp_symbol_raw = meta.get("fmp_symbol")
-        fmp_symbol = str(fmp_symbol_raw).strip().upper() if fmp_symbol_raw else None
-
-        specs[key] = FuturesContractSpec(
-            symbol=key,
-            multiplier=float(meta["multiplier"]),
-            tick_size=float(meta["tick_size"]),
-            currency=str(meta["currency"]),
-            exchange=str(meta["exchange"]),
-            asset_class=cast(FuturesAssetClass, asset_class_raw),
-            fmp_symbol=fmp_symbol,
-        )
+        spec = _build_contract_spec(str(symbol), meta, "contracts.yaml")
+        specs[spec.symbol] = spec
 
     return specs
+
+
+def _rows_to_specs(rows: Dict[str, Dict[str, Any]]) -> Dict[str, FuturesContractSpec]:
+    """Convert DB rows into futures contract specs."""
+    specs: Dict[str, FuturesContractSpec] = {}
+    for symbol, row in rows.items():
+        spec = _build_contract_spec(str(symbol), dict(row), "database")
+        specs[spec.symbol] = spec
+    return specs
+
+
+@lru_cache(maxsize=1)
+def load_contract_specs() -> Dict[str, FuturesContractSpec]:
+    """Load contract specs from DB first, then fall back to YAML."""
+    try:
+        import logging
+
+        from database import get_db_session
+        from inputs.database_client import DatabaseClient
+
+        with get_db_session() as conn:
+            db_client = DatabaseClient(conn)
+            rows = db_client.get_futures_contracts()
+        if rows:
+            return _rows_to_specs(rows)
+    except Exception as e:
+        logging.getLogger(__name__).warning("futures contracts DB read failed: %s", e)
+
+    catalog = _load_contracts_yaml()
+    return _parse_catalog(catalog)
 
 
 def get_contract_spec(symbol: str) -> Optional[FuturesContractSpec]:

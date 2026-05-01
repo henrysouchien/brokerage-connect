@@ -15,12 +15,17 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from brokerage._logging import portfolio_logger
 from brokerage.broker_adapter import BrokerAdapter
+from brokerage.snaptrade._shared import ApiException, is_snaptrade_secret_error
 from brokerage.snaptrade.client import (
     _get_user_account_balance_with_retry,
     _list_user_accounts_with_retry,
-    get_snaptrade_client,
+    _require_snaptrade_client,
 )
-from brokerage.snaptrade.secrets import get_snaptrade_user_secret
+from brokerage.snaptrade.connections import (
+    list_user_brokerage_authorizations,
+    refresh_brokerage_authorization,
+)
+from brokerage.snaptrade.recovery import _try_rotate_secret
 from brokerage.snaptrade.trading import (
     cancel_snaptrade_order,
     get_snaptrade_orders,
@@ -40,17 +45,25 @@ class SnapTradeBrokerAdapter(BrokerAdapter):
     def __init__(
         self,
         user_email: str,
+        user_secret: str,
         snaptrade_client: Optional[object] = None,
         region: str = "us-east-1",
         user_id: Optional[int] = None,
+        on_secret_rotated: Callable[[str], None] | None = None,
+        refresh_secret: Callable[[], str | None] | None = None,
         on_refresh: Callable[[str], None] | None = None,
     ) -> None:
         self._user_email = user_email
+        if not user_secret:
+            raise ValueError(f"SnapTrade user_secret required for {user_email}")
+        self._user_secret = user_secret
         self._region = region
         self._user_id = user_id
         self._snaptrade_client = snaptrade_client
         self._accounts_cache: Optional[List[Dict[str, Any]]] = None
         self._accounts_cache_at: Optional[datetime] = None
+        self._on_secret_rotated = on_secret_rotated
+        self._refresh_secret_callback = refresh_secret
         self._on_refresh = on_refresh or (lambda _account_id: None)
 
     @property
@@ -94,9 +107,12 @@ class SnapTradeBrokerAdapter(BrokerAdapter):
     def search_symbol(self, account_id: str, ticker: str) -> Dict[str, Any]:
         return search_snaptrade_symbol(
             user_email=self._user_email,
+            user_secret=self._user_secret,
             account_id=account_id,
             ticker=ticker,
-            client=self._get_client(),
+            on_secret_rotated=self._handle_secret_rotated,
+            refresh_secret=self._refresh_secret,
+            budget_user_id=self._user_id,
         )
 
     def preview_order(
@@ -112,8 +128,18 @@ class SnapTradeBrokerAdapter(BrokerAdapter):
         symbol_id: Optional[str] = None,
     ) -> OrderPreview:
         """Request broker-native preview/impact estimate from SnapTrade."""
+        side_upper = str(side or "").upper().strip()
+        if side_upper == "SHORT":
+            raise ValueError(
+                "SnapTrade does not support SHORT orders. "
+                "Use an IBKR account for short selling."
+            )
+        if side_upper == "COVER":
+            side = "BUY"
+
         preview_raw = preview_snaptrade_order(
             user_email=self._user_email,
+            user_secret=self._user_secret,
             account_id=account_id,
             ticker=ticker,
             side=side.upper(),
@@ -123,7 +149,9 @@ class SnapTradeBrokerAdapter(BrokerAdapter):
             limit_price=limit_price,
             stop_price=stop_price,
             universal_symbol_id=symbol_id,
-            client=self._get_client(),
+            on_secret_rotated=self._handle_secret_rotated,
+            refresh_secret=self._refresh_secret,
+            budget_user_id=self._user_id,
         )
         preview = preview_raw if isinstance(preview_raw, dict) else {}
         broker_trade_id = preview.get("snaptrade_trade_id") or preview.get("broker_trade_id")
@@ -156,9 +184,12 @@ class SnapTradeBrokerAdapter(BrokerAdapter):
 
         response_raw = place_snaptrade_checked_order(
             user_email=self._user_email,
+            user_secret=self._user_secret,
             snaptrade_trade_id=snaptrade_trade_id,
             wait_to_confirm=bool(order_params.get("wait_to_confirm", True)),
-            client=self._get_client(),
+            on_secret_rotated=self._handle_secret_rotated,
+            refresh_secret=self._refresh_secret,
+            budget_user_id=self._user_id,
         )
         response = response_raw if isinstance(response_raw, dict) else {}
         brokerage_order_id = (
@@ -186,10 +217,13 @@ class SnapTradeBrokerAdapter(BrokerAdapter):
         """Fetch SnapTrade order history and map rows to common order status objects."""
         raw_orders = get_snaptrade_orders(
             user_email=self._user_email,
+            user_secret=self._user_secret,
             account_id=account_id,
             state=state,
             days=days,
-            client=self._get_client(),
+            on_secret_rotated=self._handle_secret_rotated,
+            refresh_secret=self._refresh_secret,
+            budget_user_id=self._user_id,
         )
         out: List[OrderStatus] = []
         for row in raw_orders:
@@ -224,9 +258,12 @@ class SnapTradeBrokerAdapter(BrokerAdapter):
         """Submit cancellation request for one SnapTrade order."""
         response_raw = cancel_snaptrade_order(
             user_email=self._user_email,
+            user_secret=self._user_secret,
             account_id=account_id,
             order_id=order_id,
-            client=self._get_client(),
+            on_secret_rotated=self._handle_secret_rotated,
+            refresh_secret=self._refresh_secret,
+            budget_user_id=self._user_id,
         )
         response = response_raw if isinstance(response_raw, dict) else {}
         return CancelResult(
@@ -239,7 +276,32 @@ class SnapTradeBrokerAdapter(BrokerAdapter):
         try:
             client = self._get_client()
             user_id, user_secret = self._get_identity()
-            response = _get_user_account_balance_with_retry(client, user_id, user_secret, account_id)
+            try:
+                response = _get_user_account_balance_with_retry(
+                    client,
+                    user_id,
+                    user_secret,
+                    account_id,
+                    budget_user_id=self._user_id,
+                )
+            except ApiException as exc:
+                if not is_snaptrade_secret_error(exc):
+                    raise
+                _try_rotate_secret(
+                    self._user_email,
+                    user_secret,
+                    on_secret_rotated=self._handle_secret_rotated,
+                    refresh_secret=self._refresh_secret,
+                    budget_user_id=self._user_id,
+                )
+                user_id, user_secret = self._get_identity()
+                response = _get_user_account_balance_with_retry(
+                    client,
+                    user_id,
+                    user_secret,
+                    account_id,
+                    budget_user_id=self._user_id,
+                )
             balances = response.body if hasattr(response, "body") else response
             if not isinstance(balances, list):
                 return None
@@ -257,13 +319,30 @@ class SnapTradeBrokerAdapter(BrokerAdapter):
         try:
             authorization_id = self._resolve_authorization_id(account_id)
             if authorization_id:
-                user_id, user_secret = self._get_identity()
-                client = self._get_client()
-                client.connections.refresh_brokerage_authorization(
-                    authorization_id=authorization_id,
-                    user_id=user_id,
-                    user_secret=user_secret,
-                )
+                _user_id, user_secret = self._get_identity()
+                try:
+                    refresh_brokerage_authorization(
+                        authorization_id,
+                        self._user_email,
+                        self._user_secret,
+                        budget_user_id=self._user_id,
+                    )
+                except ApiException as exc:
+                    if not is_snaptrade_secret_error(exc):
+                        raise
+                    _try_rotate_secret(
+                        self._user_email,
+                        user_secret,
+                        on_secret_rotated=self._handle_secret_rotated,
+                        refresh_secret=self._refresh_secret,
+                        budget_user_id=self._user_id,
+                    )
+                    refresh_brokerage_authorization(
+                        authorization_id,
+                        self._user_email,
+                        self._user_secret,
+                        budget_user_id=self._user_id,
+                    )
         except Exception as refresh_err:
             portfolio_logger.warning(
                 f"Failed to refresh brokerage authorization for account {account_id}: {refresh_err}"
@@ -302,7 +381,30 @@ class SnapTradeBrokerAdapter(BrokerAdapter):
         client = self._get_client()
         user_id, user_secret = self._get_identity()
 
-        response = _list_user_accounts_with_retry(client, user_id, user_secret)
+        try:
+            response = _list_user_accounts_with_retry(
+                client,
+                user_id,
+                user_secret,
+                budget_user_id=self._user_id,
+            )
+        except ApiException as exc:
+            if not is_snaptrade_secret_error(exc):
+                raise
+            _try_rotate_secret(
+                self._user_email,
+                user_secret,
+                on_secret_rotated=self._handle_secret_rotated,
+                refresh_secret=self._refresh_secret,
+                budget_user_id=self._user_id,
+            )
+            user_id, user_secret = self._get_identity()
+            response = _list_user_accounts_with_retry(
+                client,
+                user_id,
+                user_secret,
+                budget_user_id=self._user_id,
+            )
         accounts = response.body if hasattr(response, "body") else response
         if not isinstance(accounts, list):
             accounts = []
@@ -320,19 +422,19 @@ class SnapTradeBrokerAdapter(BrokerAdapter):
                     return auth_id
 
         try:
-            user_id, user_secret = self._get_identity()
-            response = self._get_client().connections.list_brokerage_authorizations(
-                user_id=user_id,
-                user_secret=user_secret,
+            auths = list_user_brokerage_authorizations(
+                self._user_email,
+                self._user_secret,
+                on_secret_rotated=self._handle_secret_rotated,
+                refresh_secret=self._refresh_secret,
+                budget_user_id=self._user_id,
             )
-            auths = response.body if hasattr(response, "body") else response
-            if isinstance(auths, list):
-                for auth in auths:
-                    auth_id = auth.get("id")
-                    auth_accounts = auth.get("accounts") or []
-                    for account in auth_accounts:
-                        if str(account.get("id")) == str(account_id):
-                            return auth_id
+            for auth in auths:
+                auth_id = auth.get("id")
+                auth_accounts = auth.get("accounts") or []
+                for account in auth_accounts:
+                    if str(account.get("id")) == str(account_id):
+                        return auth_id
         except Exception as e:
             portfolio_logger.warning(f"Failed to resolve authorization for account {account_id}: {e}")
 
@@ -357,19 +459,26 @@ class SnapTradeBrokerAdapter(BrokerAdapter):
         if self._snaptrade_client is not None:
             return self._snaptrade_client
 
-        client = get_snaptrade_client(self._region)
-        if client is None:
-            raise RuntimeError("SnapTrade client unavailable")
-
-        self._snaptrade_client = client
-        return client
+        del self._region
+        self._snaptrade_client = _require_snaptrade_client()
+        return self._snaptrade_client
 
     def _get_identity(self) -> Tuple[str, str]:
         user_id = get_snaptrade_user_id_from_email(self._user_email)
-        user_secret = get_snaptrade_user_secret(self._user_email)
-        if not user_secret:
-            raise ValueError(f"No SnapTrade user secret found for {self._user_email}")
-        return user_id, user_secret
+        return user_id, self._user_secret
+
+    def _handle_secret_rotated(self, new_secret: str) -> None:
+        self._user_secret = new_secret
+        if self._on_secret_rotated is not None:
+            self._on_secret_rotated(new_secret)
+
+    def _refresh_secret(self) -> str | None:
+        if self._refresh_secret_callback is None:
+            return self._user_secret
+        refreshed = self._refresh_secret_callback()
+        if refreshed:
+            self._user_secret = refreshed
+        return refreshed
 
 
 def _to_float(value: Any) -> Optional[float]:

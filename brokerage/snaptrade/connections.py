@@ -3,34 +3,55 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from brokerage._logging import log_error, portfolio_logger
-from settings import FRONTEND_BASE_URL
+from brokerage.snaptrade._shared import (
+    _budget_kwargs,
+    _extract_snaptrade_body,
+    _get_snaptrade_identity,
+)
 from brokerage.snaptrade.client import (
+    _call_with_secret_rotation,
     _detail_brokerage_authorization_with_retry,
     _get_user_account_balance_with_retry,
-    _list_user_accounts_with_retry,
+    _list_user_brokerage_authorizations_with_retry,
     _login_snap_trade_user_with_retry,
+    _refresh_brokerage_authorization_with_retry,
+    _remove_brokerage_authorization_with_retry,
+    _require_snaptrade_client,
     _symbol_search_user_account_with_retry,
-    get_snaptrade_client,
+    list_user_accounts,
 )
-from brokerage.snaptrade.secrets import get_snaptrade_user_secret
-from brokerage.snaptrade.users import get_snaptrade_user_id_from_email, register_snaptrade_user
+from brokerage.snaptrade.users import get_snaptrade_user_id_from_email
+from settings import FRONTEND_BASE_URL
+
+
+def _normalize_payload_list(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, list):
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    for row in payload:
+        if hasattr(row, "to_dict"):
+            row = row.to_dict()
+        if isinstance(row, dict):
+            normalized.append(row)
+    return normalized
 
 
 def create_snaptrade_connection_url(
     user_email: str,
-    client,
-    connection_type: str = "trade",
+    user_secret: str,
+    connection_type: str | None = None,
+    *,
+    budget_user_id: int | None = None,
 ) -> str:
     """Create a SnapTrade connection URL for account linking."""
-    try:
-        snaptrade_user_id = get_snaptrade_user_id_from_email(user_email)
-        user_secret = get_snaptrade_user_secret(user_email)
+    client = _require_snaptrade_client()
 
-        if not user_secret:
-            user_secret = register_snaptrade_user(user_email, client)
+    try:
+        snaptrade_user_id, user_secret = _get_snaptrade_identity(user_email, user_secret)
 
         response = _login_snap_trade_user_with_retry(
             client,
@@ -40,6 +61,7 @@ def create_snaptrade_connection_url(
             immediate_redirect=True,
             custom_redirect=f"{FRONTEND_BASE_URL}/snaptrade/success",
             connection_type=connection_type,
+            **_budget_kwargs(budget_user_id),
         )
 
         return response.body["redirectURI"]
@@ -50,22 +72,16 @@ def create_snaptrade_connection_url(
 
 def upgrade_snaptrade_connection_to_trade(
     user_email: str,
+    user_secret: str,
     authorization_id: str,
-    client=None,
+    *,
+    budget_user_id: int | None = None,
 ) -> str:
     """Upgrade existing read-only authorization to trading-enabled."""
-    if not client:
-        client = get_snaptrade_client()
-    if not client:
-        raise ValueError("SnapTrade client unavailable")
+    client = _require_snaptrade_client()
 
     try:
-        snaptrade_user_id = get_snaptrade_user_id_from_email(user_email)
-        user_secret = get_snaptrade_user_secret(user_email)
-
-        if not user_secret:
-            raise ValueError(f"No SnapTrade user secret found for {user_email}")
-
+        snaptrade_user_id, user_secret = _get_snaptrade_identity(user_email, user_secret)
         response = _login_snap_trade_user_with_retry(
             client,
             snaptrade_user_id,
@@ -73,6 +89,7 @@ def upgrade_snaptrade_connection_to_trade(
             immediate_redirect=False,
             connection_type="trade",
             reconnect=authorization_id,
+            **_budget_kwargs(budget_user_id),
         )
 
         redirect_uri = response.body["redirectURI"]
@@ -81,28 +98,55 @@ def upgrade_snaptrade_connection_to_trade(
             authorization_id,
         )
         return redirect_uri
-
     except Exception as e:
         log_error("snaptrade_connection", "upgrade_to_trade", e)
         raise
 
 
-def list_snaptrade_connections(user_email: str, client) -> List[Dict[str, Any]]:
+def list_user_brokerage_authorizations(
+    user_email: str,
+    user_secret: str,
+    *,
+    on_secret_rotated: Callable[[str], None] | None = None,
+    refresh_secret: Callable[[], str | None] | None = None,
+    budget_user_id: int | None = None,
+) -> list[dict[str, Any]]:
+    client = _require_snaptrade_client()
+    response = _call_with_secret_rotation(
+        user_email,
+        user_secret,
+        lambda user_id, secret: _list_user_brokerage_authorizations_with_retry(
+            client,
+            user_id,
+            secret,
+            **_budget_kwargs(budget_user_id),
+        ),
+        on_secret_rotated=on_secret_rotated,
+        refresh_secret=refresh_secret,
+        operation_name="list_user_brokerage_authorizations",
+        user_id=budget_user_id,
+        budget_user_id=budget_user_id,
+    )
+    return _normalize_payload_list(_extract_snaptrade_body(response))
+
+
+def list_snaptrade_connections(
+    user_email: str,
+    user_secret: str,
+    *,
+    on_secret_rotated: Callable[[str], None] | None = None,
+    refresh_secret: Callable[[], str | None] | None = None,
+    budget_user_id: int | None = None,
+) -> List[Dict[str, Any]]:
     """List user's SnapTrade brokerage connections."""
     try:
-        snaptrade_user_id = get_snaptrade_user_id_from_email(user_email)
-        user_secret = get_snaptrade_user_secret(user_email)
-
-        if not user_secret:
-            return []
-
-        accounts_response = _list_user_accounts_with_retry(
-            client,
-            snaptrade_user_id,
+        accounts = list_user_accounts(
+            user_email,
             user_secret,
+            on_secret_rotated=on_secret_rotated,
+            refresh_secret=refresh_secret,
+            **_budget_kwargs(budget_user_id),
         )
-        accounts = accounts_response.body if hasattr(accounts_response, "body") else accounts_response
-
         connections: List[Dict[str, Any]] = []
         for account in accounts:
             connections.append(
@@ -118,7 +162,6 @@ def list_snaptrade_connections(user_email: str, client) -> List[Dict[str, Any]]:
             )
 
         return connections
-
     except Exception as e:
         log_error("snaptrade_connection", "list_connections", e)
         raise
@@ -126,8 +169,12 @@ def list_snaptrade_connections(user_email: str, client) -> List[Dict[str, Any]]:
 
 def check_snaptrade_connection_health(
     user_email: str,
-    client,
+    user_secret: str,
     probe_trading: bool = False,
+    *,
+    on_secret_rotated: Callable[[str], None] | None = None,
+    refresh_secret: Callable[[], str | None] | None = None,
+    budget_user_id: int | None = None,
 ) -> List[Dict[str, Any]]:
     """Check SnapTrade connection health grouped by authorization ID."""
 
@@ -141,30 +188,42 @@ def check_snaptrade_connection_health(
 
     try:
         snaptrade_user_id = get_snaptrade_user_id_from_email(user_email)
-        user_hash = hashlib.sha256(snaptrade_user_id.encode()).hexdigest()[:16]
-        user_secret = get_snaptrade_user_secret(user_email)
+        current_secret = user_secret
 
-        if not user_secret:
+        def _on_rotated(new_secret: str) -> None:
+            nonlocal current_secret
+            current_secret = new_secret
+            if on_secret_rotated is not None:
+                on_secret_rotated(new_secret)
+
+        def _refresh_current() -> str | None:
+            nonlocal current_secret
+            if refresh_secret is None:
+                return current_secret
+            refreshed = refresh_secret()
+            if refreshed:
+                current_secret = refreshed
+            return refreshed
+
+        user_hash = hashlib.sha256(snaptrade_user_id.encode()).hexdigest()[:16]
+        client = _require_snaptrade_client()
+        accounts = list_user_accounts(
+            user_email,
+            current_secret,
+            on_secret_rotated=_on_rotated,
+            refresh_secret=_refresh_current,
+            **_budget_kwargs(budget_user_id),
+        )
+        if not accounts:
             return []
+
+        _user_id, current_secret = _get_snaptrade_identity(user_email, current_secret)
 
         portfolio_logger.debug(
             "Running SnapTrade connection health check for user_hash=%s, probe_trading=%s",
             user_hash,
             probe_trading,
         )
-
-        try:
-            accounts_response = _list_user_accounts_with_retry(
-                client,
-                snaptrade_user_id,
-                user_secret,
-            )
-            accounts = accounts_response.body if hasattr(accounts_response, "body") else accounts_response
-            if not isinstance(accounts, list):
-                accounts = []
-        except Exception as list_error:
-            log_error("snaptrade_connection", "health_check_list_user_accounts", list_error)
-            return []
 
         grouped: Dict[str, Dict[str, Any]] = {}
         for account in accounts:
@@ -206,9 +265,10 @@ def check_snaptrade_connection_health(
                     client=client,
                     authorization_id=authorization_id,
                     user_id=snaptrade_user_id,
-                    user_secret=user_secret,
+                    user_secret=current_secret,
+                    **_budget_kwargs(budget_user_id),
                 )
-                detail = detail_response.body if hasattr(detail_response, "body") else detail_response
+                detail = _extract_snaptrade_body(detail_response)
                 if hasattr(detail, "to_dict"):
                     detail = detail.to_dict()
                 if isinstance(detail, dict):
@@ -234,8 +294,9 @@ def check_snaptrade_connection_health(
                     _get_user_account_balance_with_retry(
                         client=client,
                         user_id=snaptrade_user_id,
-                        user_secret=user_secret,
+                        user_secret=current_secret,
                         account_id=probe_account_id,
+                        **_budget_kwargs(budget_user_id),
                     )
                     data_ok = True
                 except Exception as balance_error:
@@ -252,9 +313,10 @@ def check_snaptrade_connection_health(
                     _symbol_search_user_account_with_retry(
                         client=client,
                         user_id=snaptrade_user_id,
-                        user_secret=user_secret,
+                        user_secret=current_secret,
                         account_id=probe_account_id,
                         substring="AAPL",
+                        **_budget_kwargs(budget_user_id),
                     )
                     trading_ok = True
                 except Exception as trading_probe_error:
@@ -281,29 +343,58 @@ def check_snaptrade_connection_health(
             )
 
         return health_results
-
     except Exception as e:
         log_error("snaptrade_connection", "check_connection_health", e)
         return []
 
 
-def remove_snaptrade_connection(user_email: str, authorization_id: str, client) -> None:
+def refresh_brokerage_authorization(
+    authorization_id: str,
+    user_email: str,
+    user_secret: str,
+    *,
+    budget_user_id: int | None = None,
+):
+    client = _require_snaptrade_client()
+    user_id, user_secret = _get_snaptrade_identity(user_email, user_secret)
+    response = _refresh_brokerage_authorization_with_retry(
+        client=client,
+        authorization_id=authorization_id,
+        user_id=user_id,
+        user_secret=user_secret,
+        **_budget_kwargs(budget_user_id),
+    )
+    return _extract_snaptrade_body(response)
+
+
+def remove_snaptrade_connection(
+    user_email: str,
+    user_secret: str,
+    authorization_id: str,
+    *,
+    on_secret_rotated: Callable[[str], None] | None = None,
+    refresh_secret: Callable[[], str | None] | None = None,
+    budget_user_id: int | None = None,
+) -> None:
     """Remove one SnapTrade brokerage authorization."""
     try:
-        snaptrade_user_id = get_snaptrade_user_id_from_email(user_email)
-        user_secret = get_snaptrade_user_secret(user_email)
-
-        if not user_secret:
-            raise ValueError(f"No SnapTrade user secret found for {user_email}")
-
-        client.connections.remove_brokerage_authorization(
-            user_id=snaptrade_user_id,
-            user_secret=user_secret,
-            authorization_id=authorization_id,
+        _call_with_secret_rotation(
+            user_email,
+            user_secret,
+            lambda user_id, secret: _remove_brokerage_authorization_with_retry(
+                _require_snaptrade_client(),
+                user_id,
+                secret,
+                authorization_id,
+                **_budget_kwargs(budget_user_id),
+            ),
+            on_secret_rotated=on_secret_rotated,
+            refresh_secret=refresh_secret,
+            operation_name="remove_snaptrade_connection",
+            user_id=budget_user_id,
+            budget_user_id=budget_user_id,
         )
-
         portfolio_logger.info("✅ Removed SnapTrade connection: %s", authorization_id)
-
     except Exception as e:
         log_error("snaptrade_connection", "remove_connection", e)
         raise
@@ -313,6 +404,8 @@ __all__ = [
     "check_snaptrade_connection_health",
     "create_snaptrade_connection_url",
     "list_snaptrade_connections",
+    "list_user_brokerage_authorizations",
+    "refresh_brokerage_authorization",
     "remove_snaptrade_connection",
     "upgrade_snaptrade_connection_to_trade",
 ]

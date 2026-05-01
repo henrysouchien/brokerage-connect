@@ -20,6 +20,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
+from app_platform.api_budget import BudgetExceededError
 from brokerage._logging import portfolio_logger
 from brokerage.broker_adapter import BrokerAdapter
 from brokerage.config import (
@@ -43,6 +44,7 @@ from ibkr.config import (
     IBKR_TRADE_CLIENT_ID,
 )
 from ibkr.connection import IBKRConnectionManager
+from ibkr._budget import guard_ib_call
 from ibkr.locks import ibkr_shared_lock
 from options import OptionLeg, OptionStrategy
 from providers.routing_config import TRADE_ACCOUNT_MAP
@@ -68,6 +70,12 @@ _trading_conn_manager_factory: Any = None
 
 _IBKR_MAX_FLOAT = sys.float_info.max
 _IBKR_COMMISSION_UNAVAILABLE_WARNING = "IBKR could not compute commission for this order"
+_IB_ACTION_MAP = {
+    "BUY": "BUY",
+    "SELL": "SELL",
+    "SHORT": "SELL",
+    "COVER": "BUY",
+}
 
 
 def _get_trading_conn_manager() -> IBKRConnectionManager:
@@ -190,7 +198,14 @@ class IBKRBrokerAdapter(BrokerAdapter):
         front_contract = resolve_futures_contract(sym, contract_month=fm)
         back_contract = resolve_futures_contract(sym, contract_month=bm)
 
-        qualified = list(ib.qualifyContracts(front_contract, back_contract) or [])
+        qualified = list(
+            guard_ib_call(
+                operation="qualifyContracts",
+                fn=ib.qualifyContracts,
+                args=(front_contract, back_contract),
+            )
+            or []
+        )
         if len(qualified) < 2:
             raise ValueError(f"Failed to qualify contracts for {sym} {fm}/{bm}")
 
@@ -307,7 +322,14 @@ class IBKRBrokerAdapter(BrokerAdapter):
                 resolve_option_contract(underlying_symbol, contract_identity=contract_identity)
             )
 
-        qualified_contracts = list(ib.qualifyContracts(*contracts_to_qualify) or [])
+        qualified_contracts = list(
+            guard_ib_call(
+                operation="qualifyContracts",
+                fn=ib.qualifyContracts,
+                args=tuple(contracts_to_qualify),
+            )
+            or []
+        )
         if len(qualified_contracts) != len(contracts_to_qualify):
             raise ValueError("Failed to qualify one or more combo leg contracts on IBKR")
 
@@ -400,12 +422,16 @@ class IBKRBrokerAdapter(BrokerAdapter):
                 for contract in qualified_contracts:
                     sec_type = str(getattr(contract, "secType", "") or "").upper()
                     generic_ticks = "100,101,106" if sec_type == "OPT" else ""
-                    ticker = ib.reqMktData(
-                        contract,
-                        genericTickList=generic_ticks,
-                        snapshot=False,
-                        regulatorySnapshot=False,
-                        mktDataOptions=[],
+                    ticker = guard_ib_call(
+                        operation="reqMktData",
+                        fn=ib.reqMktData,
+                        args=(contract,),
+                        kwargs={
+                            "genericTickList": generic_ticks,
+                            "snapshot": False,
+                            "regulatorySnapshot": False,
+                            "mktDataOptions": [],
+                        },
                     )
                     tickers.append(ticker)
 
@@ -434,7 +460,13 @@ class IBKRBrokerAdapter(BrokerAdapter):
             finally:
                 for ticker in tickers:
                     try:
-                        ib.cancelMktData(getattr(ticker, "contract", None) or ticker)
+                        guard_ib_call(
+                            operation="cancelMktData",
+                            fn=ib.cancelMktData,
+                            args=((getattr(ticker, "contract", None) or ticker),),
+                        )
+                    except BudgetExceededError:
+                        raise
                     except Exception:
                         pass
 
@@ -492,7 +524,11 @@ class IBKRBrokerAdapter(BrokerAdapter):
                 stop_price=None,
                 account_id=account_id,
             )
-            order_state = ib.whatIfOrder(bag, order)
+            order_state = guard_ib_call(
+                operation="whatIfOrder",
+                fn=ib.whatIfOrder,
+                args=(bag, order),
+            )
 
             estimated_commission, commission_unavailable = _parse_preview_commission(
                 getattr(order_state, "commission", None)
@@ -586,7 +622,11 @@ class IBKRBrokerAdapter(BrokerAdapter):
             if order_params.get("preview_id"):
                 order.orderRef = str(order_params["preview_id"])
 
-            trade = ib.placeOrder(bag, order)
+            trade = guard_ib_call(
+                operation="placeOrder",
+                fn=ib.placeOrder,
+                args=(bag, order),
+            )
 
             max_wait_seconds = 5.0
             waited = 0.0
@@ -647,7 +687,11 @@ class IBKRBrokerAdapter(BrokerAdapter):
             if symbol_id:
                 try:
                     contract = Contract(conId=int(symbol_id), exchange="SMART")
-                    qualified = ib.qualifyContracts(contract)
+                    qualified = guard_ib_call(
+                        operation="qualifyContracts",
+                        fn=ib.qualifyContracts,
+                        args=(contract,),
+                    )
                     if qualified:
                         contract = qualified[0]
                         symbol_info = {
@@ -658,6 +702,8 @@ class IBKRBrokerAdapter(BrokerAdapter):
                     else:
                         symbol_info = self._search_symbol_with_ib(ib, ticker)
                         contract = symbol_info["contract"]
+                except BudgetExceededError:
+                    raise
                 except Exception:
                     symbol_info = self._search_symbol_with_ib(ib, ticker)
                     contract = symbol_info["contract"]
@@ -675,7 +721,11 @@ class IBKRBrokerAdapter(BrokerAdapter):
                 account_id=account_id,
             )
 
-            order_state = ib.whatIfOrder(contract, order)
+            order_state = guard_ib_call(
+                operation="whatIfOrder",
+                fn=ib.whatIfOrder,
+                args=(contract, order),
+            )
 
             estimated_commission, commission_unavailable = _parse_preview_commission(
                 getattr(order_state, "commission", None)
@@ -684,18 +734,30 @@ class IBKRBrokerAdapter(BrokerAdapter):
             estimated_price = limit_price or stop_price
             if estimated_price is None:
                 try:
-                    ib.reqMktData(contract, "", False, False)
+                    guard_ib_call(
+                        operation="reqMktData",
+                        fn=ib.reqMktData,
+                        args=(contract, "", False, False),
+                    )
                     ib.sleep(2)
                     ticker_obj = ib.ticker(contract)
                     if ticker_obj and ticker_obj.last and ticker_obj.last > 0:
                         estimated_price = float(ticker_obj.last)
                     elif ticker_obj and ticker_obj.close and ticker_obj.close > 0:
                         estimated_price = float(ticker_obj.close)
+                except BudgetExceededError:
+                    raise
                 except Exception:
                     pass
                 finally:
                     try:
-                        ib.cancelMktData(contract)
+                        guard_ib_call(
+                            operation="cancelMktData",
+                            fn=ib.cancelMktData,
+                            args=(contract,),
+                        )
+                    except BudgetExceededError:
+                        raise
                     except Exception:
                         pass
 
@@ -776,7 +838,11 @@ class IBKRBrokerAdapter(BrokerAdapter):
                 account_id=account_id,
             )
 
-            order_state = ib.whatIfOrder(bag, order)
+            order_state = guard_ib_call(
+                operation="whatIfOrder",
+                fn=ib.whatIfOrder,
+                args=(bag, order),
+            )
 
             estimated_commission, commission_unavailable = _parse_preview_commission(
                 getattr(order_state, "commission", None)
@@ -874,7 +940,11 @@ class IBKRBrokerAdapter(BrokerAdapter):
             if order_params.get("preview_id"):
                 order.orderRef = str(order_params["preview_id"])
 
-            trade = ib.placeOrder(bag, order)
+            trade = guard_ib_call(
+                operation="placeOrder",
+                fn=ib.placeOrder,
+                args=(bag, order),
+            )
 
             max_wait_seconds = 5.0
             waited = 0.0
@@ -935,16 +1005,28 @@ class IBKRBrokerAdapter(BrokerAdapter):
 
             if stored_con_id:
                 contract = Contract(conId=int(stored_con_id), exchange="SMART")
-                qualified = ib.qualifyContracts(contract)
+                qualified = guard_ib_call(
+                    operation="qualifyContracts",
+                    fn=ib.qualifyContracts,
+                    args=(contract,),
+                )
                 if not qualified:
                     portfolio_logger.warning(
                         f"conId {stored_con_id} qualification failed, falling back to ticker"
                     )
                     contract = Stock(ticker, "SMART", "USD")
-                    qualified = ib.qualifyContracts(contract)
+                    qualified = guard_ib_call(
+                        operation="qualifyContracts",
+                        fn=ib.qualifyContracts,
+                        args=(contract,),
+                    )
             else:
                 contract = Stock(ticker, "SMART", "USD")
-                qualified = ib.qualifyContracts(contract)
+                qualified = guard_ib_call(
+                    operation="qualifyContracts",
+                    fn=ib.qualifyContracts,
+                    args=(contract,),
+                )
 
             if not qualified:
                 raise ValueError(f"Cannot re-qualify contract for {ticker}")
@@ -969,7 +1051,11 @@ class IBKRBrokerAdapter(BrokerAdapter):
             if order_params.get("preview_id"):
                 order.orderRef = str(order_params["preview_id"])
 
-            trade = ib.placeOrder(contract, order)
+            trade = guard_ib_call(
+                operation="placeOrder",
+                fn=ib.placeOrder,
+                args=(contract, order),
+            )
 
             max_wait = 5
             waited = 0
@@ -1034,7 +1120,11 @@ class IBKRBrokerAdapter(BrokerAdapter):
                     results.append(self._map_trade_to_status(trade))
 
             if state in ("all", "executed", "cancelled"):
-                completed_trades = ib.reqCompletedOrders(apiOnly=False)
+                completed_trades = guard_ib_call(
+                    operation="reqCompletedOrders",
+                    fn=ib.reqCompletedOrders,
+                    kwargs={"apiOnly": False},
+                )
                 for trade in completed_trades:
                     if account_id and trade.order.account != account_id:
                         continue
@@ -1079,7 +1169,11 @@ class IBKRBrokerAdapter(BrokerAdapter):
                     f"Open order {order_id} not found in IB Gateway for account {account_id}"
                 )
 
-            ib.cancelOrder(target_trade.order)
+            guard_ib_call(
+                operation="cancelOrder",
+                fn=ib.cancelOrder,
+                args=(target_trade.order,),
+            )
             ib.sleep(2)
 
             return CancelResult(
@@ -1112,6 +1206,8 @@ class IBKRBrokerAdapter(BrokerAdapter):
                 "IB Gateway is not running. Start IB Gateway on "
                 f"{IBKR_GATEWAY_HOST}:{IBKR_GATEWAY_PORT} and try again."
             ) from e
+        except BudgetExceededError:
+            raise
         except Exception as e:
             message = str(e).lower()
             if "2fa" in message or "authentication" in message or "auth" in message:
@@ -1139,7 +1235,7 @@ class IBKRBrokerAdapter(BrokerAdapter):
     ):
         from ib_async import LimitOrder, MarketOrder, Order, StopOrder
 
-        action = side.upper()
+        action = _IB_ACTION_MAP.get(side.upper(), side.upper())
         qty = float(quantity)
 
         tif_map = {
@@ -1182,7 +1278,11 @@ class IBKRBrokerAdapter(BrokerAdapter):
 
         ticker_upper = (ticker or "").upper().strip()
         contract = Stock(ticker_upper, "SMART", "USD")
-        qualified = ib.qualifyContracts(contract)
+        qualified = guard_ib_call(
+            operation="qualifyContracts",
+            fn=ib.qualifyContracts,
+            args=(contract,),
+        )
         if not qualified:
             raise ValueError(
                 f"Could not resolve ticker '{ticker_upper}' on IBKR. "
@@ -1210,11 +1310,17 @@ class IBKRBrokerAdapter(BrokerAdapter):
                     return float(av.value)
 
             if not account_values:
-                ib.reqAccountUpdates(account=account_id)
+                guard_ib_call(
+                    operation="reqAccountUpdates",
+                    fn=ib.reqAccountUpdates,
+                    kwargs={"account": account_id},
+                )
                 account_values = ib.accountValues(account=account_id)
                 for av in account_values:
                     if av.tag == "AvailableFunds" and av.currency == "USD":
                         return float(av.value)
+        except BudgetExceededError:
+            raise
         except Exception as e:
             portfolio_logger.warning(f"Failed to get IBKR balance for {account_id}: {e}")
         return None
@@ -1268,9 +1374,24 @@ class IBKRBrokerAdapter(BrokerAdapter):
                     filled = fill_filled
                     execution_price = fill_avg_price
 
+        # Fallback: order.filledQuantity from IBKR completed order wire data.
+        # ib_async's reqCompletedOrders creates Trade objects with zeroed
+        # orderStatus fields and empty fills list, but order.filledQuantity
+        # IS parsed from the wire by the decoder.
+        if filled <= 0 and ibkr_status in ("Filled", "Cancelled", "ApiCancelled"):
+            sec_type = getattr(trade.contract, "secType", "")
+            if sec_type != "BAG":
+                order_filled_qty = _to_float(getattr(trade.order, "filledQuantity", None))
+                if order_filled_qty is not None and 0 < order_filled_qty < _IBKR_MAX_FLOAT:
+                    filled = order_filled_qty
+
         order_total_quantity = _to_float(getattr(trade.order, "totalQuantity", None)) or 0.0
         if order_total_quantity <= 0 and filled > 0:
             order_total_quantity = filled
+
+        # Fix remaining for completed orders (ib_async defaults to 0.0)
+        if remaining <= 0 and filled > 0 and order_total_quantity > filled:
+            remaining = order_total_quantity - filled
 
         commission = self._commission_from_trade(trade)
         total_cost = None
@@ -1280,6 +1401,26 @@ class IBKRBrokerAdapter(BrokerAdapter):
         time_placed_iso = _iso(_as_utc(time_placed))
         time_updated_iso = _iso(_as_utc(time_updated))
 
+        status = ibkr_to_common_status(ibkr_status, filled, remaining)
+
+        # Override false-positive EXECUTED: completed orders with "Filled"
+        # status but zero filled quantity are not actually filled.
+        # BAG orders excluded via secType guard — they legitimately show
+        # Filled+0 at the combo level.
+        if status == "EXECUTED" and filled <= 0:
+            sec_type = getattr(trade.contract, "secType", "")
+            if sec_type != "BAG":
+                status = "CANCELED"
+                portfolio_logger.warning(
+                    "IBKR order %s: Filled+0 with no fill evidence — overriding to CANCELED",
+                    trade.order.orderId,
+                )
+
+        # Filter UNSET_DOUBLE from broker_data diagnostic field
+        raw_order_filled = _to_float(getattr(trade.order, "filledQuantity", None))
+        if raw_order_filled is not None and raw_order_filled >= _IBKR_MAX_FLOAT:
+            raw_order_filled = None
+
         return OrderStatus(
             brokerage_order_id=str(trade.order.orderId),
             perm_id=str(trade.order.permId) if trade.order.permId else None,
@@ -1287,7 +1428,7 @@ class IBKRBrokerAdapter(BrokerAdapter):
             side=trade.order.action,
             quantity=order_total_quantity,
             order_type=trade.order.orderType,
-            status=ibkr_to_common_status(ibkr_status, filled, remaining),
+            status=status,
             filled_quantity=filled,
             total_quantity=order_total_quantity,
             execution_price=execution_price,
@@ -1295,7 +1436,10 @@ class IBKRBrokerAdapter(BrokerAdapter):
             commission=commission,
             time_placed=time_placed_iso,
             time_updated=time_updated_iso,
-            broker_data={"ibkr_status": ibkr_status},
+            broker_data={
+                "ibkr_status": ibkr_status,
+                "order_filled_quantity": raw_order_filled,
+            },
         )
 
     def _commission_from_trade(self, trade) -> Optional[float]:

@@ -20,7 +20,12 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
-from app_platform.api_budget import BudgetExceededError
+try:
+    from brokerage._shared.budget_exceptions import BudgetExceededError
+except ModuleNotFoundError as e:
+    if e.name not in {"app_platform", "app_platform.api_budget"}:
+        raise
+    from brokerage._shared.budget_exceptions import BudgetExceededError
 from brokerage._logging import portfolio_logger
 from brokerage.broker_adapter import BrokerAdapter
 from brokerage.config import (
@@ -46,8 +51,7 @@ from ibkr.config import (
 from ibkr.connection import IBKRConnectionManager
 from ibkr._budget import guard_ib_call
 from ibkr.locks import ibkr_shared_lock
-from options import OptionLeg, OptionStrategy
-from providers.routing_config import TRADE_ACCOUNT_MAP
+from brokerage.options_types import OptionLeg, OptionStrategy
 
 
 IBKR_STATUS_MAP = {
@@ -97,19 +101,39 @@ def ibkr_to_common_status(status: str, filled: float = 0, remaining: float = 0) 
 
 
 class IBKRBrokerAdapter(BrokerAdapter):
-    """Interactive Brokers adapter with contract qualification safeguards."""
+    """Interactive Brokers adapter with contract qualification safeguards.
+
+    ``account_map`` maps aggregator account IDs to native IBKR account IDs.
+    Monorepo callers can pass ``providers.routing_config.TRADE_ACCOUNT_MAP``
+    explicitly to preserve import-time env parsing; standalone callers can rely
+    on the constructor-time ``TRADE_ACCOUNT_MAP`` env fallback.
+    """
 
     def __init__(
         self,
         user_email: str,
         on_refresh: Callable[[str], None] | None = None,
-    ):
+        *,
+        account_map: dict[str, str] | None = None,
+    ) -> None:
         self._user_email = user_email
         # Use a dedicated connection with IBKR_TRADE_CLIENT_ID to avoid
         # colliding with ibkr-mcp (IBKR_CLIENT_ID) or market data (IBKR_CLIENT_ID+1).
         self._conn_manager = _get_trading_conn_manager()
         self._on_refresh = on_refresh or (lambda _account_id: None)
         self._warned_empty_authorized_accounts = False
+        self._account_map = account_map if account_map is not None else self._parse_env_account_map()
+
+    @staticmethod
+    def _parse_env_account_map() -> dict[str, str]:
+        raw = os.getenv("TRADE_ACCOUNT_MAP", "")
+        out: dict[str, str] = {}
+        for pair in raw.split(","):
+            pair = pair.strip()
+            if ":" in pair:
+                agg_id, native_id = pair.split(":", 1)
+                out[agg_id.strip()] = native_id.strip()
+        return out
 
     @property
     def provider_name(self) -> str:
@@ -118,11 +142,11 @@ class IBKRBrokerAdapter(BrokerAdapter):
     def _resolve_native_account(self, account_id: str) -> str:
         """Translate aggregator account ID to native IBKR account ID if mapped.
 
-        Uses directional TRADE_ACCOUNT_MAP lookup (aggregator -> native), not
+        Uses directional account-map lookup (aggregator -> native), not
         resolve_account_aliases() equivalence classes. This is intentional:
         trade submission needs the specific native ID, not all aliases.
         """
-        return TRADE_ACCOUNT_MAP.get(account_id, account_id)
+        return self._account_map.get(account_id, account_id)
 
     def owns_account(self, account_id: str) -> bool:
         """Check whether this adapter handles the given account.

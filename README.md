@@ -8,7 +8,7 @@ Unified Python interface for brokerage APIs. One abstract adapter, multiple brok
 |--------|-------|--------|
 | **Schwab** | `pip install brokerage-connect[schwab]` | Token-based auth via `schwab-py` |
 | **SnapTrade** | `pip install brokerage-connect[snaptrade]` | OAuth connection flow |
-| **IBKR** | `pip install brokerage-connect[ibkr]` | Monorepo-only — adapter requires risk_module monorepo (app_platform, options, providers.routing_config). [ibkr] extra installs the SDK but the adapter is not standalone-importable. |
+| **IBKR** | `pip install brokerage-connect[ibkr]` | Trade adapter via `interactive-brokers-mcp` PyPI dep |
 | **Plaid** | `pip install brokerage-connect[plaid]` | Investments + account APIs via `plaid-python` |
 
 ## Install
@@ -19,6 +19,7 @@ pip install brokerage-connect
 # With broker-specific dependencies:
 pip install brokerage-connect[schwab]
 pip install brokerage-connect[schwab,plaid]
+pip install brokerage-connect[schwab,ibkr]
 pip install brokerage-connect[plaid]
 ```
 

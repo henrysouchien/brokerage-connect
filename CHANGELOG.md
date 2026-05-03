@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0 - 2026-05-03
+
+- IBKR is now standalone-installable via `brokerage-connect[ibkr]`; `from brokerage.ibkr.adapter import IBKRBrokerAdapter` works without the risk_module monorepo on `PYTHONPATH`.
+- The `[ibkr]` extra now depends on `interactive-brokers-mcp>=0.2.4`, which brings the sibling `ibkr.*` modules and a heavier opt-in dependency tree.
+- Added standalone `brokerage.options_types.OptionLeg` and `OptionStrategy` shapes for adapter option-trade flows.
+- `IBKRBrokerAdapter` now accepts `account_map=` for aggregator-to-native account routing and falls back to parsing `TRADE_ACCOUNT_MAP` from the environment.
+
 ## 0.5.0 - 2026-05-03
 
 - SnapTrade, Plaid, and Schwab provider clients now support standalone wheel installs via `brokerage-connect[snaptrade]`, `brokerage-connect[plaid]`, and `brokerage-connect[schwab]` without requiring the risk_module monorepo on `PYTHONPATH`.

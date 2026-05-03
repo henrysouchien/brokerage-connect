@@ -7,7 +7,18 @@ import functools
 import time
 from typing import Any, Dict, Optional
 
-from app_platform.api_budget import guard_call
+try:
+    from app_platform.api_budget import guard_call
+except ModuleNotFoundError as e:
+    # Only fall back when app_platform itself or its api_budget submodule is unavailable
+    # (dist runtime). Re-raise if a transitive import inside app_platform.api_budget fails —
+    # those represent monorepo bugs that must surface, not silently disable budget enforcement.
+    if e.name not in {"app_platform", "app_platform.api_budget"}:
+        raise
+    def guard_call(*, fn, args=(), kwargs=None, **_):
+        """No-op fallback when app_platform.api_budget isn't installed (dist runtime)."""
+        return fn(*args, **(kwargs or {}))
+
 from brokerage._logging import (
     log_critical_alert,
     log_error,
@@ -15,7 +26,7 @@ from brokerage._logging import (
     plaid_logger,
 )
 from brokerage.config import PLAID_CLIENT_ID, PLAID_ENV, PLAID_SECRET
-from config.api_budget_costs import COST_PER_CALL
+from brokerage._shared.api_budget_costs import COST_PER_CALL
 
 _PLAID_IMPORT_ERROR: Exception | None = None
 _PLAID_AVAILABLE = False

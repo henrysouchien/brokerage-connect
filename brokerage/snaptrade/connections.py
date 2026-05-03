@@ -24,7 +24,13 @@ from brokerage.snaptrade.client import (
     list_user_accounts,
 )
 from brokerage.snaptrade.users import get_snaptrade_user_id_from_email
-from settings import FRONTEND_BASE_URL
+try:
+    from settings import FRONTEND_BASE_URL
+except ModuleNotFoundError as e:
+    if e.name != "settings":
+        raise
+    import os
+    FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "http://localhost:3000")
 
 
 def _normalize_payload_list(payload: Any) -> list[dict[str, Any]]:

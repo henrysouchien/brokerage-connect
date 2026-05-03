@@ -25,7 +25,7 @@ Package metadata lives in `brokerage/pyproject.toml` under the name `risk-module
 |---|---|---|
 | SnapTrade | `risk-module-brokerage[snaptrade]` | Connection flows, account discovery, trade preview/execute, order status |
 | Schwab | `risk-module-brokerage[schwab]` | Direct Schwab client and trade adapter |
-| IBKR | `risk-module-brokerage[ibkr]` | Trade adapter that works alongside the separate `ibkr/` package |
+| IBKR | `risk-module-brokerage[ibkr]` | Trade adapter that works alongside the separate `ibkr/` package (monorepo-only — see top-level README) |
 | Plaid | `risk-module-brokerage[plaid]` | Connection-oriented helpers and secrets support |
 
 ## Install
@@ -33,7 +33,7 @@ Package metadata lives in `brokerage/pyproject.toml` under the name `risk-module
 ```bash
 pip install risk-module-brokerage
 pip install "risk-module-brokerage[snaptrade]"
-pip install "risk-module-brokerage[schwab,ibkr]"
+pip install "risk-module-brokerage[schwab,plaid]"
 ```
 
 ## Public Exports

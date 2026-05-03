@@ -14,7 +14,18 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
-from app_platform.api_budget import guard_call
+try:
+    from app_platform.api_budget import guard_call
+except ModuleNotFoundError as e:
+    # Only fall back when app_platform itself or its api_budget submodule is unavailable
+    # (dist runtime). Re-raise if a transitive import inside app_platform.api_budget fails —
+    # those represent monorepo bugs that must surface, not silently disable budget enforcement.
+    if e.name not in {"app_platform", "app_platform.api_budget"}:
+        raise
+    def guard_call(*, fn, args=(), kwargs=None, **_):
+        """No-op fallback when app_platform.api_budget isn't installed (dist runtime)."""
+        return fn(*args, **(kwargs or {}))
+
 from brokerage._logging import portfolio_logger
 from brokerage.broker_adapter import BrokerAdapter
 from brokerage.schwab.client import (
@@ -25,7 +36,7 @@ from brokerage.schwab.client import (
 )
 from brokerage.schwab.orders import build_equity_order_spec
 from brokerage.trade_objects import BrokerAccount, CancelResult, OrderPreview, OrderResult, OrderStatus
-from config.api_budget_costs import COST_PER_CALL
+from brokerage._shared.api_budget_costs import COST_PER_CALL
 
 
 SCHWAB_STATUS_MAP = {

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from brokerage.trade_objects import (
     BrokerAccount,
@@ -12,6 +12,12 @@ from brokerage.trade_objects import (
     OrderResult,
     OrderStatus,
 )
+
+if TYPE_CHECKING:
+    import pandas as pd
+
+    from brokerage.options_types import OptionStrategy
+    from ibkr.contract_spec import IBKRContractSpec
 
 
 class BrokerAdapter(ABC):
@@ -93,3 +99,93 @@ class BrokerAdapter(ABC):
     @abstractmethod
     def refresh_after_trade(self, account_id: str) -> None:
         """Trigger post-trade position refresh/cache invalidation."""
+
+    @abstractmethod
+    def fetch_market_snapshot(
+        self,
+        contracts: list[IBKRContractSpec | Any],
+        *,
+        budget_user_id: int | None = None,
+        **kwargs,
+    ) -> list[dict[str, Any]]:
+        """Fetch live market snapshots for broker-native contract specs."""
+
+    @abstractmethod
+    def get_live_positions(
+        self,
+        account_id: str | None = None,
+        *,
+        budget_user_id: int | None = None,
+    ) -> pd.DataFrame:
+        """Fetch live broker positions for safety validation."""
+
+    @abstractmethod
+    def query_open_orders(
+        self,
+        account_id: str | None = None,
+        *,
+        budget_user_id: int | None = None,
+    ) -> List[OrderStatus]:
+        """Query currently open orders for broker recovery probes.
+
+        ``OrderStatus.broker_data`` must include these keys for recovery
+        matching: ``order_ref``, ``con_id``, ``symbol``, ``action``,
+        ``quantity``, ``filled``, and ``remaining``.
+        """
+
+    @abstractmethod
+    def query_completed_orders(
+        self,
+        account_id: str | None = None,
+        *,
+        budget_user_id: int | None = None,
+    ) -> List[OrderStatus]:
+        """Query completed orders for broker recovery probes.
+
+        ``OrderStatus.broker_data`` must include these keys for recovery
+        matching: ``order_ref``, ``con_id``, ``symbol``, ``action``,
+        ``quantity``, ``filled``, and ``remaining``.
+        """
+
+    @abstractmethod
+    def preview_roll(
+        self,
+        account_id: str,
+        symbol: str,
+        front_month: str,
+        back_month: str,
+        quantity: float,
+        direction: str = "long_roll",
+        order_type: str = "Market",
+        limit_price: Optional[float] = None,
+        time_in_force: str = "Day",
+    ) -> OrderPreview:
+        """Preview a futures calendar roll."""
+
+    @abstractmethod
+    def place_roll(
+        self,
+        account_id: str,
+        order_params: Dict[str, Any],
+    ) -> OrderResult:
+        """Place a previously previewed futures calendar roll."""
+
+    @abstractmethod
+    def preview_multileg_option(
+        self,
+        account_id: str,
+        strategy: OptionStrategy,
+        quantity: float,
+        order_type: str = "Market",
+        limit_price: Optional[float] = None,
+        time_in_force: str = "Day",
+    ) -> OrderPreview:
+        """Preview a multi-leg option order."""
+
+    @abstractmethod
+    def place_multileg_option(
+        self,
+        account_id: str,
+        order_params: Dict[str, Any],
+    ) -> OrderResult:
+        """Place a previously previewed multi-leg option order."""

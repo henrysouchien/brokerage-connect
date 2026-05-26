@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import math
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from brokerage._logging import portfolio_logger
 from brokerage.broker_adapter import BrokerAdapter
-from brokerage.snaptrade._shared import ApiException, is_snaptrade_secret_error
+from brokerage.snaptrade._shared import ApiException, _extract_snaptrade_body, is_snaptrade_secret_error
 from brokerage.snaptrade.client import (
+    _detail_brokerage_authorization_with_retry,
     _get_user_account_balance_with_retry,
     _list_user_accounts_with_retry,
     _require_snaptrade_client,
@@ -36,11 +37,26 @@ from brokerage.snaptrade.trading import (
 from brokerage.snaptrade.users import get_snaptrade_user_id_from_email
 from brokerage.trade_objects import BrokerAccount, CancelResult, OrderPreview, OrderResult, OrderStatus
 
+if TYPE_CHECKING:
+    import pandas as pd
+
+    from brokerage.options_types import OptionStrategy
+    from ibkr.contract_spec import IBKRContractSpec
+
+
+_ACCOUNTS_CACHE: Dict[str, Tuple[datetime, List[Dict[str, Any]]]] = {}
+_AUTHORIZATION_STATUS_CACHE: Dict[Tuple[str, str], Tuple[datetime, Dict[str, Any]]] = {}
+
+
+def _copy_accounts(accounts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [dict(account) for account in accounts if isinstance(account, dict)]
+
 
 class SnapTradeBrokerAdapter(BrokerAdapter):
     """BrokerAdapter implementation for SnapTrade-managed accounts."""
 
     ACCOUNT_CACHE_SECONDS = 60
+    AUTHORIZATION_STATUS_CACHE_SECONDS = 300
 
     def __init__(
         self,
@@ -70,6 +86,81 @@ class SnapTradeBrokerAdapter(BrokerAdapter):
     def provider_name(self) -> str:
         return "snaptrade"
 
+    def _unsupported_ibkr_method(self, method_name: str):
+        raise NotImplementedError(f"{self.provider_name} does not support {method_name}")
+
+    def fetch_market_snapshot(
+        self,
+        contracts: list[IBKRContractSpec | Any],
+        *,
+        budget_user_id: int | None = None,
+        **kwargs,
+    ) -> list[dict[str, Any]]:
+        return self._unsupported_ibkr_method("fetch_market_snapshot")
+
+    def get_live_positions(
+        self,
+        account_id: str | None = None,
+        *,
+        budget_user_id: int | None = None,
+    ) -> pd.DataFrame:
+        return self._unsupported_ibkr_method("get_live_positions")
+
+    def query_open_orders(
+        self,
+        account_id: str | None = None,
+        *,
+        budget_user_id: int | None = None,
+    ) -> List[OrderStatus]:
+        return self._unsupported_ibkr_method("query_open_orders")
+
+    def query_completed_orders(
+        self,
+        account_id: str | None = None,
+        *,
+        budget_user_id: int | None = None,
+    ) -> List[OrderStatus]:
+        return self._unsupported_ibkr_method("query_completed_orders")
+
+    def preview_roll(
+        self,
+        account_id: str,
+        symbol: str,
+        front_month: str,
+        back_month: str,
+        quantity: float,
+        direction: str = "long_roll",
+        order_type: str = "Market",
+        limit_price: Optional[float] = None,
+        time_in_force: str = "Day",
+    ) -> OrderPreview:
+        return self._unsupported_ibkr_method("preview_roll")
+
+    def place_roll(
+        self,
+        account_id: str,
+        order_params: Dict[str, Any],
+    ) -> OrderResult:
+        return self._unsupported_ibkr_method("place_roll")
+
+    def preview_multileg_option(
+        self,
+        account_id: str,
+        strategy: OptionStrategy,
+        quantity: float,
+        order_type: str = "Market",
+        limit_price: Optional[float] = None,
+        time_in_force: str = "Day",
+    ) -> OrderPreview:
+        return self._unsupported_ibkr_method("preview_multileg_option")
+
+    def place_multileg_option(
+        self,
+        account_id: str,
+        order_params: Dict[str, Any],
+    ) -> OrderResult:
+        return self._unsupported_ibkr_method("place_multileg_option")
+
     def owns_account(self, account_id: str) -> bool:
         accounts = self._fetch_accounts(force_refresh=False)
         for account in accounts:
@@ -80,15 +171,27 @@ class SnapTradeBrokerAdapter(BrokerAdapter):
     def list_accounts(self) -> List[BrokerAccount]:
         """List SnapTrade accounts that can accept trading orders."""
         accounts = self._fetch_accounts(force_refresh=False)
+        authorization_status = self._fetch_authorization_status_by_id(accounts)
         out: List[BrokerAccount] = []
         for account in accounts:
             account_id = str(account.get("id"))
+            authorization_id = self._extract_authorization_id(account)
+            connection_meta = authorization_status.get(authorization_id or "")
+            if connection_meta and bool(connection_meta.get("connection_disabled")):
+                portfolio_logger.info(
+                    "Skipping disabled SnapTrade authorization %s for account %s",
+                    authorization_id,
+                    account_id,
+                )
+                continue
+
             cash_balance = self.get_account_balance(account_id)
             account_type_raw = account.get("account_type") or account.get("type")
             account_type = str(account_type_raw).upper().strip() if account_type_raw is not None else None
             account_name = account.get("name")
             institution_name = account.get("institution_name")
-            meta = account.get("meta") if isinstance(account.get("meta"), dict) else {}
+            meta = dict(account.get("meta")) if isinstance(account.get("meta"), dict) else {}
+            meta.update(connection_meta or {})
             out.append(
                 BrokerAccount(
                     account_id=account_id,
@@ -98,7 +201,7 @@ class SnapTradeBrokerAdapter(BrokerAdapter):
                     cash_balance=cash_balance,
                     available_funds=cash_balance,
                     account_type=account_type,
-                    authorization_id=self._extract_authorization_id(account),
+                    authorization_id=authorization_id,
                     meta=meta,
                 )
             )
@@ -378,6 +481,14 @@ class SnapTradeBrokerAdapter(BrokerAdapter):
         ):
             return self._accounts_cache
 
+        cached = _ACCOUNTS_CACHE.get(self._user_email)
+        if not force_refresh and cached is not None:
+            cached_at, cached_accounts = cached
+            if (datetime.now(timezone.utc) - cached_at).total_seconds() < self.ACCOUNT_CACHE_SECONDS:
+                self._accounts_cache = _copy_accounts(cached_accounts)
+                self._accounts_cache_at = cached_at
+                return self._accounts_cache
+
         client = self._get_client()
         user_id, user_secret = self._get_identity()
 
@@ -409,9 +520,10 @@ class SnapTradeBrokerAdapter(BrokerAdapter):
         if not isinstance(accounts, list):
             accounts = []
 
-        self._accounts_cache = accounts
+        self._accounts_cache = _copy_accounts(accounts)
         self._accounts_cache_at = datetime.now(timezone.utc)
-        return accounts
+        _ACCOUNTS_CACHE[self._user_email] = (self._accounts_cache_at, _copy_accounts(self._accounts_cache))
+        return self._accounts_cache
 
     def _resolve_authorization_id(self, account_id: str) -> Optional[str]:
         accounts = self._fetch_accounts(force_refresh=False)
@@ -448,6 +560,85 @@ class SnapTradeBrokerAdapter(BrokerAdapter):
             return str(auth)
         return None
 
+    def _fetch_authorization_status_by_id(self, accounts: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        authorization_ids = sorted(
+            {
+                auth_id
+                for account in accounts
+                if (auth_id := self._extract_authorization_id(account))
+            }
+        )
+        status_by_id: Dict[str, Dict[str, Any]] = {}
+        for authorization_id in authorization_ids:
+            try:
+                status_by_id[authorization_id] = self._fetch_authorization_status(authorization_id)
+            except Exception as e:
+                portfolio_logger.warning(
+                    "Failed to inspect SnapTrade authorization %s status: %s",
+                    authorization_id,
+                    e,
+                    exc_info=True,
+                )
+        return status_by_id
+
+    def _fetch_authorization_status(self, authorization_id: str) -> Dict[str, Any]:
+        cache_key = (self._user_email, authorization_id)
+        cached = _AUTHORIZATION_STATUS_CACHE.get(cache_key)
+        if cached is not None:
+            cached_at, cached_status = cached
+            if (
+                datetime.now(timezone.utc) - cached_at
+            ).total_seconds() < self.AUTHORIZATION_STATUS_CACHE_SECONDS:
+                return dict(cached_status)
+
+        client = self._get_client()
+        user_id, user_secret = self._get_identity()
+        try:
+            response = _detail_brokerage_authorization_with_retry(
+                client=client,
+                authorization_id=authorization_id,
+                user_id=user_id,
+                user_secret=user_secret,
+                budget_user_id=self._user_id,
+            )
+        except ApiException as exc:
+            if not is_snaptrade_secret_error(exc):
+                raise
+            _try_rotate_secret(
+                self._user_email,
+                user_secret,
+                on_secret_rotated=self._handle_secret_rotated,
+                refresh_secret=self._refresh_secret,
+                budget_user_id=self._user_id,
+            )
+            user_id, user_secret = self._get_identity()
+            response = _detail_brokerage_authorization_with_retry(
+                client=client,
+                authorization_id=authorization_id,
+                user_id=user_id,
+                user_secret=user_secret,
+                budget_user_id=self._user_id,
+            )
+
+        detail = _extract_snaptrade_body(response)
+        if hasattr(detail, "to_dict"):
+            detail = detail.to_dict()
+        if not isinstance(detail, dict):
+            status = {"connection_status": "unknown"}
+            _AUTHORIZATION_STATUS_CACHE[cache_key] = (datetime.now(timezone.utc), status)
+            return dict(status)
+
+        disabled = bool(detail.get("disabled", False))
+        connection_type = detail.get("type") or detail.get("connection_type") or "unknown"
+        status = {
+            "connection_status": "disabled" if disabled else "connected",
+            "connection_disabled": disabled,
+            "connection_disabled_date": detail.get("disabled_date"),
+            "connection_type": str(connection_type),
+        }
+        _AUTHORIZATION_STATUS_CACHE[cache_key] = (datetime.now(timezone.utc), status)
+        return dict(status)
+
     def _get_fractional_share_support(self, account_meta: BrokerAccount) -> Optional[bool]:
         meta = account_meta.meta or {}
         for key in ("supports_fractional_shares", "fractional_shares_supported", "fractional_trading_enabled"):
@@ -459,7 +650,6 @@ class SnapTradeBrokerAdapter(BrokerAdapter):
         if self._snaptrade_client is not None:
             return self._snaptrade_client
 
-        del self._region
         self._snaptrade_client = _require_snaptrade_client()
         return self._snaptrade_client
 

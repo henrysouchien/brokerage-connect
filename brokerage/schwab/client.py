@@ -439,6 +439,7 @@ def schwab_login(manual: bool = False) -> Any:
                 app_secret=SCHWAB_APP_SECRET,
                 callback_url=SCHWAB_CALLBACK_URL,
                 token_path=token_path,
+                interactive=False,
             )
         except TypeError:
             client = auth.client_from_login_flow(

@@ -81,6 +81,8 @@ def _load_contracts_yaml() -> Dict[str, Any]:
     contracts = payload.get("contracts", {})
     if not isinstance(contracts, dict):
         raise ValueError("Invalid contracts catalog: 'contracts' must be a mapping")
+    if not contracts:
+        raise ValueError("Invalid contracts catalog: 'contracts' must not be empty")
     return contracts
 
 
@@ -129,6 +131,8 @@ def _parse_catalog(catalog: Dict[str, Any]) -> Dict[str, FuturesContractSpec]:
         spec = _build_contract_spec(str(symbol), meta, "contracts.yaml")
         specs[spec.symbol] = spec
 
+    if not specs:
+        raise ValueError("Invalid contracts catalog: no contracts found")
     return specs
 
 
@@ -143,20 +147,25 @@ def _rows_to_specs(rows: Dict[str, Dict[str, Any]]) -> Dict[str, FuturesContract
 
 @lru_cache(maxsize=1)
 def load_contract_specs() -> Dict[str, FuturesContractSpec]:
-    """Load contract specs from DB first, then fall back to YAML."""
-    try:
-        import logging
+    """Load contract specs from DB, or YAML when DB is unavailable."""
+    from utils.reference_data import (
+        is_reference_database_available,
+        raise_reference_data_unavailable,
+    )
 
+    if is_reference_database_available():
         from database import get_db_session
         from inputs.database_client import DatabaseClient
 
-        with get_db_session() as conn:
-            db_client = DatabaseClient(conn)
-            rows = db_client.get_futures_contracts()
-        if rows:
-            return _rows_to_specs(rows)
-    except Exception as e:
-        logging.getLogger(__name__).warning("futures contracts DB read failed: %s", e)
+        try:
+            with get_db_session() as conn:
+                db_client = DatabaseClient(conn)
+                rows = db_client.get_futures_contracts()
+            if rows:
+                return _rows_to_specs(rows)
+            raise RuntimeError("futures_contracts returned no rows")
+        except Exception as e:
+            raise_reference_data_unavailable("futures contracts", e)
 
     catalog = _load_contracts_yaml()
     return _parse_catalog(catalog)

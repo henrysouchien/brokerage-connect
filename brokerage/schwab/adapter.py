@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 try:
     from app_platform.api_budget import guard_call
@@ -37,6 +37,12 @@ from brokerage.schwab.client import (
 from brokerage.schwab.orders import build_equity_order_spec
 from brokerage.trade_objects import BrokerAccount, CancelResult, OrderPreview, OrderResult, OrderStatus
 from brokerage._shared.api_budget_costs import COST_PER_CALL
+
+if TYPE_CHECKING:
+    import pandas as pd
+
+    from brokerage.options_types import OptionStrategy
+    from ibkr.contract_spec import IBKRContractSpec
 
 
 SCHWAB_STATUS_MAP = {
@@ -189,6 +195,81 @@ class SchwabBrokerAdapter(BrokerAdapter):
     @property
     def provider_name(self) -> str:
         return "schwab"
+
+    def _unsupported_ibkr_method(self, method_name: str):
+        raise NotImplementedError(f"{self.provider_name} does not support {method_name}")
+
+    def fetch_market_snapshot(
+        self,
+        contracts: list[IBKRContractSpec | Any],
+        *,
+        budget_user_id: int | None = None,
+        **kwargs,
+    ) -> list[dict[str, Any]]:
+        return self._unsupported_ibkr_method("fetch_market_snapshot")
+
+    def get_live_positions(
+        self,
+        account_id: str | None = None,
+        *,
+        budget_user_id: int | None = None,
+    ) -> pd.DataFrame:
+        return self._unsupported_ibkr_method("get_live_positions")
+
+    def query_open_orders(
+        self,
+        account_id: str | None = None,
+        *,
+        budget_user_id: int | None = None,
+    ) -> List[OrderStatus]:
+        return self._unsupported_ibkr_method("query_open_orders")
+
+    def query_completed_orders(
+        self,
+        account_id: str | None = None,
+        *,
+        budget_user_id: int | None = None,
+    ) -> List[OrderStatus]:
+        return self._unsupported_ibkr_method("query_completed_orders")
+
+    def preview_roll(
+        self,
+        account_id: str,
+        symbol: str,
+        front_month: str,
+        back_month: str,
+        quantity: float,
+        direction: str = "long_roll",
+        order_type: str = "Market",
+        limit_price: Optional[float] = None,
+        time_in_force: str = "Day",
+    ) -> OrderPreview:
+        return self._unsupported_ibkr_method("preview_roll")
+
+    def place_roll(
+        self,
+        account_id: str,
+        order_params: Dict[str, Any],
+    ) -> OrderResult:
+        return self._unsupported_ibkr_method("place_roll")
+
+    def preview_multileg_option(
+        self,
+        account_id: str,
+        strategy: OptionStrategy,
+        quantity: float,
+        order_type: str = "Market",
+        limit_price: Optional[float] = None,
+        time_in_force: str = "Day",
+    ) -> OrderPreview:
+        return self._unsupported_ibkr_method("preview_multileg_option")
+
+    def place_multileg_option(
+        self,
+        account_id: str,
+        order_params: Dict[str, Any],
+    ) -> OrderResult:
+        return self._unsupported_ibkr_method("place_multileg_option")
 
     def _call_with_backoff(
         self,

@@ -1,4 +1,4 @@
-"""Exceptions raised by the API budget guard."""
+"""API budget exceptions vendored for standalone brokerage-connect installs."""
 
 from __future__ import annotations
 
@@ -35,3 +35,6 @@ class BudgetExceededError(RuntimeError):
 
 class BudgetGuardUnavailable(RuntimeError):
     """Raised when the guard infrastructure is unavailable and fail-open is disabled."""
+
+
+__all__ = ["BudgetExceededError", "BudgetGuardUnavailable"]

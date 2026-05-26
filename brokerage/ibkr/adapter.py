@@ -18,14 +18,9 @@ import sys
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
-try:
-    from brokerage._shared.budget_exceptions import BudgetExceededError
-except ModuleNotFoundError as e:
-    if e.name not in {"app_platform", "app_platform.api_budget"}:
-        raise
-    from brokerage._shared.budget_exceptions import BudgetExceededError
+from brokerage._shared.budget_exceptions import BudgetExceededError
 from brokerage._logging import portfolio_logger
 from brokerage.broker_adapter import BrokerAdapter
 from brokerage.config import (
@@ -53,6 +48,12 @@ from ibkr._budget import guard_ib_call
 from ibkr.locks import ibkr_shared_lock
 from brokerage.options_types import OptionLeg, OptionStrategy
 
+if TYPE_CHECKING:
+    import pandas as pd
+
+    from ibkr.client import IBKRClient
+    from ibkr.contract_spec import IBKRContractSpec
+
 
 IBKR_STATUS_MAP = {
     "PendingSubmit": "PENDING",
@@ -72,8 +73,33 @@ _trading_conn_manager: Optional[IBKRConnectionManager] = None
 _trading_conn_lock = threading.Lock()
 _trading_conn_manager_factory: Any = None
 
+
+def _is_budget_exceeded_error(exc: BaseException) -> bool:
+    return isinstance(exc, BudgetExceededError) or (
+        exc.__class__.__name__ == "BudgetExceededError"
+        and hasattr(exc, "provider")
+        and hasattr(exc, "operation")
+    )
+
+
+def _raise_if_budget_exceeded(exc: BaseException) -> None:
+    if _is_budget_exceeded_error(exc):
+        raise exc
+
+
 _IBKR_MAX_FLOAT = sys.float_info.max
 _IBKR_COMMISSION_UNAVAILABLE_WARNING = "IBKR could not compute commission for this order"
+_RECOVERY_BROKER_DATA_KEYS = frozenset(
+    {
+        "order_ref",
+        "con_id",
+        "symbol",
+        "action",
+        "quantity",
+        "filled",
+        "remaining",
+    }
+)
 _IB_ACTION_MAP = {
     "BUY": "BUY",
     "SELL": "SELL",
@@ -123,6 +149,7 @@ class IBKRBrokerAdapter(BrokerAdapter):
         self._on_refresh = on_refresh or (lambda _account_id: None)
         self._warned_empty_authorized_accounts = False
         self._account_map = account_map if account_map is not None else self._parse_env_account_map()
+        self._client: IBKRClient | None = None
 
     @staticmethod
     def _parse_env_account_map() -> dict[str, str]:
@@ -138,6 +165,82 @@ class IBKRBrokerAdapter(BrokerAdapter):
     @property
     def provider_name(self) -> str:
         return "ibkr"
+
+    def _get_client(self) -> IBKRClient:
+        if self._client is None:
+            from ibkr.client import IBKRClient
+
+            self._client = IBKRClient()
+        return self._client
+
+    def fetch_market_snapshot(
+        self,
+        contracts: list[IBKRContractSpec | Any],
+        *,
+        budget_user_id: int | None = None,
+        **kwargs,
+    ) -> list[dict[str, Any]]:
+        """Fetch live market snapshots through the read-only IBKR client."""
+        return self._get_client().fetch_snapshot(
+            contracts=contracts,
+            budget_user_id=budget_user_id,
+            **kwargs,
+        )
+
+    def get_live_positions(
+        self,
+        account_id: str | None = None,
+        *,
+        budget_user_id: int | None = None,
+    ) -> pd.DataFrame:
+        """Fetch live IBKR positions through the read-only IBKR client."""
+        return self._get_client().get_positions(
+            account_id=account_id,
+            budget_user_id=budget_user_id,
+        )
+
+    def query_open_orders(
+        self,
+        account_id: str | None = None,
+        *,
+        budget_user_id: int | None = None,
+    ) -> List[OrderStatus]:
+        """Query open orders for uncertain-submit recovery."""
+        del budget_user_id
+        native_account_id = self._resolve_native_account(account_id) if account_id else None
+        with ibkr_shared_lock, self._connected() as ib:
+            statuses: List[OrderStatus] = []
+            for trade in ib.openTrades():
+                if native_account_id and getattr(trade.order, "account", None) != native_account_id:
+                    continue
+                status = self._map_trade_to_recovery_status(trade)
+                self._assert_recovery_broker_data(status)
+                statuses.append(status)
+            return statuses
+
+    def query_completed_orders(
+        self,
+        account_id: str | None = None,
+        *,
+        budget_user_id: int | None = None,
+    ) -> List[OrderStatus]:
+        """Query completed orders for uncertain-submit recovery."""
+        native_account_id = self._resolve_native_account(account_id) if account_id else None
+        with ibkr_shared_lock, self._connected() as ib:
+            completed_trades = guard_ib_call(
+                operation="reqCompletedOrders",
+                fn=ib.reqCompletedOrders,
+                kwargs={"apiOnly": False},
+                budget_user_id=budget_user_id,
+            )
+            statuses: List[OrderStatus] = []
+            for trade in completed_trades:
+                if native_account_id and getattr(trade.order, "account", None) != native_account_id:
+                    continue
+                status = self._map_trade_to_recovery_status(trade)
+                self._assert_recovery_broker_data(status)
+                statuses.append(status)
+            return statuses
 
     def _resolve_native_account(self, account_id: str) -> str:
         """Translate aggregator account ID to native IBKR account ID if mapped.
@@ -491,7 +594,8 @@ class IBKRBrokerAdapter(BrokerAdapter):
                         )
                     except BudgetExceededError:
                         raise
-                    except Exception:
+                    except Exception as exc:
+                        _raise_if_budget_exceeded(exc)
                         pass
 
             leg_prices: list[dict[str, Any]] = []
@@ -728,7 +832,8 @@ class IBKRBrokerAdapter(BrokerAdapter):
                         contract = symbol_info["contract"]
                 except BudgetExceededError:
                     raise
-                except Exception:
+                except Exception as exc:
+                    _raise_if_budget_exceeded(exc)
                     symbol_info = self._search_symbol_with_ib(ib, ticker)
                     contract = symbol_info["contract"]
             else:
@@ -771,7 +876,8 @@ class IBKRBrokerAdapter(BrokerAdapter):
                         estimated_price = float(ticker_obj.close)
                 except BudgetExceededError:
                     raise
-                except Exception:
+                except Exception as exc:
+                    _raise_if_budget_exceeded(exc)
                     pass
                 finally:
                     try:
@@ -782,7 +888,8 @@ class IBKRBrokerAdapter(BrokerAdapter):
                         )
                     except BudgetExceededError:
                         raise
-                    except Exception:
+                    except Exception as exc:
+                        _raise_if_budget_exceeded(exc)
                         pass
 
             estimated_total = None
@@ -1230,9 +1337,8 @@ class IBKRBrokerAdapter(BrokerAdapter):
                 "IB Gateway is not running. Start IB Gateway on "
                 f"{IBKR_GATEWAY_HOST}:{IBKR_GATEWAY_PORT} and try again."
             ) from e
-        except BudgetExceededError:
-            raise
         except Exception as e:
+            _raise_if_budget_exceeded(e)
             message = str(e).lower()
             if "2fa" in message or "authentication" in message or "auth" in message:
                 raise ValueError(
@@ -1343,9 +1449,8 @@ class IBKRBrokerAdapter(BrokerAdapter):
                 for av in account_values:
                     if av.tag == "AvailableFunds" and av.currency == "USD":
                         return float(av.value)
-        except BudgetExceededError:
-            raise
         except Exception as e:
+            _raise_if_budget_exceeded(e)
             portfolio_logger.warning(f"Failed to get IBKR balance for {account_id}: {e}")
         return None
 
@@ -1464,6 +1569,45 @@ class IBKRBrokerAdapter(BrokerAdapter):
                 "ibkr_status": ibkr_status,
                 "order_filled_quantity": raw_order_filled,
             },
+        )
+
+    def _map_trade_to_recovery_status(self, trade) -> OrderStatus:
+        status = self._map_trade_to_status(trade)
+        order = getattr(trade, "order", None)
+        contract = getattr(trade, "contract", None)
+        order_status = getattr(trade, "orderStatus", None)
+
+        raw_quantity = _to_float(getattr(order, "totalQuantity", None)) if order else None
+        quantity = raw_quantity if raw_quantity is not None and raw_quantity > 0 else status.total_quantity
+        filled = _to_float(getattr(order_status, "filled", None)) if order_status else None
+        if filled is None or filled <= 0:
+            filled = status.filled_quantity
+        filled = filled or 0.0
+        remaining = _to_float(getattr(order_status, "remaining", None)) if order_status else None
+        if remaining is None and quantity is not None:
+            remaining = max(float(quantity) - float(filled), 0.0)
+
+        broker_data = dict(status.broker_data or {})
+        broker_data.update(
+            {
+                "order_ref": str(getattr(order, "orderRef", "") or ""),
+                "con_id": int(getattr(contract, "conId", 0) or 0),
+                "symbol": str(getattr(contract, "symbol", "") or ""),
+                "action": str(getattr(order, "action", "") or ""),
+                "quantity": float(quantity or 0.0),
+                "filled": float(filled or 0.0),
+                "remaining": float(remaining or 0.0),
+            }
+        )
+        status.broker_data = broker_data
+        return status
+
+    def _assert_recovery_broker_data(self, status: OrderStatus) -> None:
+        broker_data = status.broker_data or {}
+        missing = _RECOVERY_BROKER_DATA_KEYS - set(broker_data)
+        assert not missing, (
+            "IBKR recovery OrderStatus.broker_data missing required keys: "
+            + ", ".join(sorted(missing))
         )
 
     def _commission_from_trade(self, trade) -> Optional[float]:

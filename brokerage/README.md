@@ -1,7 +1,7 @@
 # brokerage-connect
 
 **Status:** CURRENT / ACTIVE REFERENCE
-**Last reviewed:** 2026-07-29
+**Last reviewed:** 2026-09-15
 **Current source of truth:** brokerage-connect/brokerage/ code + brokerage-connect/pyproject.toml
 
 
@@ -20,9 +20,9 @@ Package metadata lives in `pyproject.toml` (one level up, at the package root) u
 | `ibkr/` | IBKR provider modules (trade adapter, client, market data, account, connection, flex) used by trade-execution and the separate MCP shell |
 | `plaid/` | Plaid connection and secret helpers |
 | `futures/` | Futures contract specs, notionals, pricing helpers, and source adapters |
-| `config.py` | Brokerage configuration and env loading |
+| `config.py` | Broker environment values and optional application-supplied cache root; launcher owns env loading |
 
-Monorepo import path uses package `brokerage` (sourced from this tree; root `brokerage/__init__.py` only adjusts `__path__`). There is no `core/trade_objects.py` shim.
+Risk's root `brokerage/__init__.py` selects this package tree and composes its application dependencies. The published wheel imports no Risk root modules. See the package-root [application integration contract](../README.md#application-integration).
 
 ## Supported Integrations
 

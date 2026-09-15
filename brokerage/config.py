@@ -3,6 +3,12 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
+
+
+# Optional application-owned cache base. Provider-specific environment paths
+# retain precedence; standalone installs use their user cache directory.
+CACHE_ROOT: Path | None = None
 
 
 def _int_env(name: str, default: int) -> int:

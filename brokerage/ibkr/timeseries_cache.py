@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 import pandas as pd
 
+from brokerage import config
 from brokerage._shared.timeseries_store import TimeSeriesStore
 
 from .contracts import _normalize_fx_pair
@@ -37,16 +38,10 @@ def _resolve_cache_dir() -> Path:
         resolved.mkdir(parents=True, exist_ok=True)
         return resolved
 
-    configured_root = os.getenv("RISK_MODULE_ROOT")
-    if configured_root:
-        resolved = Path(configured_root).expanduser().resolve() / "cache" / "ibkr_timeseries"
+    if config.CACHE_ROOT is not None:
+        resolved = config.CACHE_ROOT / "cache" / "ibkr_timeseries"
     else:
-        try:
-            import bootstrap_env  # type: ignore[import-not-found]
-
-            resolved = Path(bootstrap_env.__file__).resolve().parent / "cache" / "ibkr_timeseries"
-        except ImportError:
-            resolved = Path.home() / ".cache" / "ibkr-mcp" / "ibkr_timeseries"
+        resolved = Path.home() / ".cache" / "ibkr-mcp" / "ibkr_timeseries"
     resolved.mkdir(parents=True, exist_ok=True)
     return resolved
 

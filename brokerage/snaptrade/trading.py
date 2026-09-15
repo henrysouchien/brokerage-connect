@@ -16,6 +16,7 @@ from brokerage.snaptrade.client import (
     _require_snaptrade_client,
     _symbol_search_user_account_with_retry,
 )
+from brokerage.snaptrade.rate_limit import _unconfigured_trade_limiter
 
 
 def search_snaptrade_symbol(
@@ -223,6 +224,7 @@ def place_snaptrade_checked_order(
     snaptrade_trade_id: str,
     wait_to_confirm: bool = True,
     *,
+    trade_limiter: Callable[[str, Callable[[], Any]], Any] = _unconfigured_trade_limiter,
     on_secret_rotated: Callable[[str], None] | None = None,
     refresh_secret: Callable[[], str | None] | None = None,
     budget_user_id: int | None = None,
@@ -241,6 +243,7 @@ def place_snaptrade_checked_order(
                 account_id=account_id,
                 trade_id=snaptrade_trade_id,
                 wait_to_confirm=wait_to_confirm,
+                trade_limiter=trade_limiter,
                 **_budget_kwargs(budget_user_id),
             ),
             on_secret_rotated=on_secret_rotated,
@@ -301,6 +304,7 @@ def cancel_snaptrade_order(
     account_id: str,
     order_id: str,
     *,
+    trade_limiter: Callable[[str, Callable[[], Any]], Any] = _unconfigured_trade_limiter,
     on_secret_rotated: Callable[[str], None] | None = None,
     refresh_secret: Callable[[], str | None] | None = None,
     budget_user_id: int | None = None,
@@ -318,6 +322,7 @@ def cancel_snaptrade_order(
                 user_secret=secret,
                 account_id=account_id,
                 brokerage_order_id=order_id,
+                trade_limiter=trade_limiter,
                 **_budget_kwargs(budget_user_id),
             ),
             on_secret_rotated=on_secret_rotated,

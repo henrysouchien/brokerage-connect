@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from typing import Any, Callable, Dict, List, Optional
 
 from brokerage._logging import log_error, portfolio_logger
@@ -24,13 +25,6 @@ from brokerage.snaptrade.client import (
     list_user_accounts,
 )
 from brokerage.snaptrade.users import get_snaptrade_user_id_from_email
-try:
-    from settings import FRONTEND_BASE_URL
-except ModuleNotFoundError as e:
-    if e.name != "settings":
-        raise
-    import os
-    FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "http://localhost:3000")
 
 
 def _normalize_payload_list(payload: Any) -> list[dict[str, Any]]:
@@ -51,6 +45,7 @@ def create_snaptrade_connection_url(
     user_secret: str,
     connection_type: str = "read",
     *,
+    frontend_base_url: str = os.getenv("FRONTEND_BASE_URL", "http://localhost:3000"),
     budget_user_id: int | None = None,
 ) -> str:
     """Create a SnapTrade connection URL for account linking.
@@ -58,6 +53,7 @@ def create_snaptrade_connection_url(
     Defaults to ``read`` so callers that do not explicitly request trading receive read-only
     access. User-facing callers may pass ``trade-if-available`` after the user chooses to enable
     trading where supported.
+    ``frontend_base_url`` selects the application's post-link redirect destination.
     """
     client = _require_snaptrade_client()
 
@@ -70,7 +66,7 @@ def create_snaptrade_connection_url(
             user_secret,
             broker=None,
             immediate_redirect=True,
-            custom_redirect=f"{FRONTEND_BASE_URL}/snaptrade/success",
+            custom_redirect=f"{frontend_base_url}/snaptrade/success",
             connection_type=connection_type,
             **_budget_kwargs(budget_user_id),
         )

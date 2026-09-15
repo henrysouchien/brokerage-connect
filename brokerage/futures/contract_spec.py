@@ -136,7 +136,7 @@ def _parse_catalog(catalog: Dict[str, Any]) -> Dict[str, FuturesContractSpec]:
     return specs
 
 
-def _rows_to_specs(rows: Dict[str, Dict[str, Any]]) -> Dict[str, FuturesContractSpec]:
+def rows_to_contract_specs(rows: Dict[str, Dict[str, Any]]) -> Dict[str, FuturesContractSpec]:
     """Convert DB rows into futures contract specs."""
     specs: Dict[str, FuturesContractSpec] = {}
     for symbol, row in rows.items():
@@ -147,26 +147,7 @@ def _rows_to_specs(rows: Dict[str, Dict[str, Any]]) -> Dict[str, FuturesContract
 
 @lru_cache(maxsize=1)
 def load_contract_specs() -> Dict[str, FuturesContractSpec]:
-    """Load contract specs from DB, or YAML when DB is unavailable."""
-    from utils.reference_data import (
-        is_reference_database_available,
-        raise_reference_data_unavailable,
-    )
-
-    if is_reference_database_available():
-        from database import get_db_session
-        from inputs.database_client import DatabaseClient
-
-        try:
-            with get_db_session() as conn:
-                db_client = DatabaseClient(conn)
-                rows = db_client.get_futures_contracts()
-            if rows:
-                return _rows_to_specs(rows)
-            raise RuntimeError("futures_contracts returned no rows")
-        except Exception as e:
-            raise_reference_data_unavailable("futures contracts", e)
-
+    """Load contract specs from the bundled, broker-agnostic YAML catalog."""
     catalog = _load_contracts_yaml()
     return _parse_catalog(catalog)
 

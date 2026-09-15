@@ -23,6 +23,8 @@ from typing import Any, Dict
 import pandas as pd
 from pandas.errors import EmptyDataError, ParserError
 
+from brokerage import config
+
 
 CURRENT_MONTH_TTL_HOURS = 4
 
@@ -47,21 +49,13 @@ def _contract_identity_fingerprint(contract_identity: dict[str, Any] | None) -> 
 
 
 def _project_root() -> Path:
-    """Return default cache directory with portable fallback behavior."""
+    """Return the configured application cache directory or standalone default."""
     configured = os.getenv("IBKR_CACHE_DIR")
     if configured:
         return Path(configured).expanduser().resolve()
 
-    configured_root = os.getenv("RISK_MODULE_ROOT")
-    if configured_root:
-        return Path(configured_root).expanduser().resolve() / "cache" / "ibkr"
-
-    try:
-        import bootstrap_env  # type: ignore[import-not-found]
-
-        return Path(bootstrap_env.__file__).resolve().parent / "cache" / "ibkr"
-    except ImportError:
-        pass
+    if config.CACHE_ROOT is not None:
+        return config.CACHE_ROOT / "cache" / "ibkr"
 
     return Path.home() / ".cache" / "ibkr-mcp"
 

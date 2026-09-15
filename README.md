@@ -1,7 +1,7 @@
 # brokerage-connect
 
 **Status:** CURRENT / ACTIVE REFERENCE
-**Last reviewed:** 2026-07-29
+**Last reviewed:** 2026-09-15
 **Role:** Package entrypoint for brokerage-connect (install, supported integrations, BrokerAdapter sketch).
 
 
@@ -61,6 +61,44 @@ class MyBroker(BrokerAdapter):
 - **`schwab/`**, **`snaptrade/`**, **`ibkr/`**, **`plaid/`** — broker/provider integrations
 - **`futures/`** — futures contract specs, notionals, pricing helpers, and source adapters
 - **`config.py`** — broker configuration and credential loading via environment variables
+
+## Application integration
+
+The wheel has no dependency on a Risk checkout. Install a provider extra before
+using that provider's SDK; importing the Flex parser and connection helpers does
+not initialize an SDK or load a checkout `.env`.
+
+- `IBKRClient(authorized_accounts=...)` accepts the application's account policy;
+  absent an explicit value, it uses `IBKR_AUTHORIZED_ACCOUNTS` from the process environment.
+- SnapTrade connection creation accepts `frontend_base_url=...` (default:
+  process `FRONTEND_BASE_URL`, then `http://localhost:3000`). A
+  `SnapTradeBrokerAdapter(..., trade_limiter=...)` requires a callable that
+  serializes/paces submissions by account. Without coordination, trading raises
+  `TradeRateLimitUnavailable`; it does not submit an unpaced order.
+- `brokerage.futures.load_contract_specs()` reads the bundled catalog.
+  Applications own database-backed reference-data policy. IBKR futures metadata
+  helpers accept `spec_loader=...`.
+- `FMPFuturesPriceSource` accepts `fetch_monthly_close`, `infer_currency`, and
+  `normalize_minor_currency_price` callables. Pass a source to
+  `get_default_pricing_chain(fmp_source=...)` or configure an application factory
+  with `configure_futures_pricing(factory=...)`. Unconfigured standalone pricing
+  has no FMP source and uses IBKR.
+- At process bootstrap, applications may call
+  `brokerage._shared.budget_guard.configure_budget(guard=..., cost_per_call=...)`.
+  The standalone default executes the operation directly and carries no billing
+  rates; it does not discover a host budget service.
+- `brokerage.ibkr.flex.configure_flex(ticker_alias_resolver=...,
+  futures_spec_loader=...)` binds application normalization policy before parsing.
+  Without configuration, Flex keeps native equity symbols and reads bundled
+  futures roots. `normalize_flex_trades` also accepts a per-call
+  `ticker_alias_resolver`.
+- `brokerage.config.CACHE_ROOT` accepts an application-owned `Path`. Explicit
+  `IBKR_CACHE_DIR` / `IBKR_TIMESERIES_CACHE_DIR` environment values take precedence;
+  without application configuration, IBKR uses the user's `.cache/ibkr-mcp` tree.
+
+Risk supplies these dependencies once from its own `brokerage/__init__.py`
+composition point. Its database, distributed trade limiter, logging, and FMP
+pricing policies remain application code and are not bundled into this wheel.
 
 ## License
 

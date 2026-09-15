@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import importlib
 import re
 import time
 import asyncio
@@ -20,10 +19,9 @@ import warnings
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 
-import certifi
-import yaml
+from brokerage.futures import FuturesContractSpec, load_contract_specs
 from brokerage._shared.budget_exceptions import BudgetExceededError
 
 
@@ -40,60 +38,42 @@ def _ensure_event_loop_for_ib_async_import() -> None:
         asyncio.set_event_loop(asyncio.new_event_loop())
 
 
-_ensure_event_loop_for_ib_async_import()
-from ib_async import FlexReport
+def _new_flex_report(**kwargs: Any) -> Any:
+    _ensure_event_loop_for_ib_async_import()
+    from ib_async import FlexReport
+
+    return FlexReport(**kwargs)
 
 from ._logging import logger
 from ._budget import guard_ib_call
 from ._types import InstrumentType
 from ._vendor import normalize_strike, safe_float
 
-try:
-    _ticker_resolver = importlib.import_module("utils.ticker_resolver")
-    _resolve_ticker_from_exchange = getattr(_ticker_resolver, "resolve_ticker_from_exchange", None)
-except Exception:
-    _resolve_ticker_from_exchange = None
+def _native_ticker(*, ticker: str, **_: Any) -> str:
+    return ticker
 
 
-_warned_missing_ticker_resolver = False
+_ticker_alias_resolver: Callable[..., str] = _native_ticker
+_futures_spec_loader: Callable[[], Mapping[str, FuturesContractSpec]] = load_contract_specs
 _FUTURES_MONTH_CODES = set("FGHJKMNQUVXZ")
 
 
-def resolve_ticker_from_exchange(
-    ticker: str,
-    company_name: str | None = None,
-    currency: str | None = None,
-    exchange_mic: str | None = None,
-    **kwargs: Any,
-) -> str:
-    """Resolve FMP ticker with guarded fallback when monorepo resolver is unavailable."""
-    if _resolve_ticker_from_exchange is not None:
-        return _resolve_ticker_from_exchange(
-            ticker=ticker,
-            company_name=company_name,
-            currency=currency,
-            exchange_mic=exchange_mic,
-            **kwargs,
-        )
-
-    global _warned_missing_ticker_resolver
-    if not _warned_missing_ticker_resolver:
-        logger.warning(
-            "utils.ticker_resolver unavailable; IBKR Flex symbol normalization fallback is active."
-        )
-        _warned_missing_ticker_resolver = True
-    return ticker
-
-# Fix macOS SSL: ib_async's FlexReport uses urllib.request.urlopen which
-# relies on the system SSL context. On macOS, Python's bundled OpenSSL
-# doesn't trust the system certificate store. Setting SSL_CERT_FILE to
-# certifi's CA bundle ensures HTTPS connections to IBKR succeed.
-if not os.environ.get("SSL_CERT_FILE"):
-    os.environ["SSL_CERT_FILE"] = certifi.where()
+def configure_flex(
+    *,
+    ticker_alias_resolver: Callable[..., str],
+    futures_spec_loader: Callable[[], Mapping[str, FuturesContractSpec]],
+) -> None:
+    """Bind application symbol/reference-data policy before parsing Flex reports."""
+    global _ticker_alias_resolver, _futures_spec_loader
+    _ticker_alias_resolver = ticker_alias_resolver
+    _futures_spec_loader = futures_spec_loader
+    _load_futures_root_symbols.cache_clear()
 
 
 @lru_cache(maxsize=1)
 def _load_ibkr_exchange_mappings() -> dict[str, Any]:
+    import yaml
+
     path = Path(__file__).resolve().with_name("exchange_mappings.yaml")
     try:
         with path.open("r", encoding="utf-8") as f:
@@ -315,7 +295,11 @@ def _build_contract_identity(trade: Any) -> Optional[Dict[str, Any]]:
     return contract_identity or None
 
 
-def normalize_flex_trades(flex_trades: Iterable[Any]) -> List[Dict[str, Any]]:
+def normalize_flex_trades(
+    flex_trades: Iterable[Any],
+    *,
+    ticker_alias_resolver: Callable[..., str] | None = None,
+) -> List[Dict[str, Any]]:
     """Convert Flex Trade rows into FIFO transaction dictionaries.
 
     Contract notes:
@@ -325,6 +309,7 @@ def normalize_flex_trades(flex_trades: Iterable[Any]) -> List[Dict[str, Any]]:
     - Missing, unsupported, or conflicting provider instrument claims fail
       closed before a canonical transaction is emitted.
     """
+    resolve_ticker = ticker_alias_resolver or _ticker_alias_resolver
     normalized: List[Dict[str, Any]] = []
     exchange_mappings = _load_ibkr_exchange_mappings()
     ibkr_exchange_to_mic = {
@@ -394,7 +379,7 @@ def normalize_flex_trades(flex_trades: Iterable[Any]) -> List[Dict[str, Any]]:
                     # IBKR can report trailing-dot symbols (e.g., "AT."); strip before suffix resolution.
                     base_symbol = symbol.rstrip(".")
                     if base_symbol:
-                        symbol = resolve_ticker_from_exchange(
+                        symbol = resolve_ticker(
                             ticker=base_symbol,
                             company_name=None,
                             currency=currency,
@@ -642,9 +627,7 @@ def _normalize_flex_currency(value: Any) -> str:
 @lru_cache(maxsize=1)
 def _load_futures_root_symbols() -> tuple[str, ...]:
     try:
-        from brokerage.futures import load_contract_specs
-
-        specs = load_contract_specs()
+        specs = _futures_spec_loader()
         roots = sorted(
             (
                 str(symbol or "").strip().upper()
@@ -1376,6 +1359,10 @@ def _download_flex_report(
     from urllib.parse import urlencode
     from urllib.request import urlopen
     import xml.etree.ElementTree as ET
+    import certifi
+
+    # urllib on macOS needs the SDK extra's CA bundle for IBKR HTTPS.
+    os.environ.setdefault("SSL_CERT_FILE", certifi.where())
 
     # --- Phase 1: Request statement generation ---
     base_url = os.getenv(
@@ -1455,7 +1442,7 @@ def _download_flex_report(
         if error_code is not None:
             return None, f"IBKR Flex Phase 2 error {error_code}"
 
-        report = FlexReport()
+        report = _new_flex_report()
         report.data = poll_data
         report.root = poll_root
         logger.info(
@@ -1525,7 +1512,7 @@ def _load_flex_report(
         if not Path(path).exists():
             return None, f"IBKR Flex XML file not found: {path}"
         try:
-            report = FlexReport(path=path)
+            report = _new_flex_report(path=path)
         except Exception:
             return None, f"Failed to load IBKR Flex XML from {path}"
 

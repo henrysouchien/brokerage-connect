@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, List, Optional, Protocol
 
 if TYPE_CHECKING:
@@ -73,13 +74,28 @@ class FuturesPricingChain:
         raise ValueError(f"No price data for futures ticker {symbol}")
 
 
-def get_default_pricing_chain() -> FuturesPricingChain:
-    """Build the default futures pricing chain (FMP first, IBKR fallback)."""
-    from brokerage.futures.sources.fmp import FMPFuturesPriceSource
+_fmp_source_factory: Callable[[], FuturesPriceSource] | None = None
+
+
+def configure_futures_pricing(*, factory: Callable[[], FuturesPriceSource]) -> None:
+    """Bind the application's FMP source factory during startup composition."""
+    global _fmp_source_factory
+    _fmp_source_factory = factory
+
+
+def get_default_pricing_chain(
+    *,
+    fmp_source: Optional[FuturesPriceSource] = None,
+) -> FuturesPricingChain:
+    """Use an explicit/configured FMP source first, then IBKR when available."""
     from brokerage.futures.sources.ibkr import IBKRFuturesPriceSource
 
+    if fmp_source is None and _fmp_source_factory is not None:
+        fmp_source = _fmp_source_factory()
+
     chain = FuturesPricingChain()
-    chain.add_source(FMPFuturesPriceSource())
+    if fmp_source is not None:
+        chain.add_source(fmp_source)
     chain.add_source(IBKRFuturesPriceSource())
     return chain
 
@@ -87,5 +103,6 @@ def get_default_pricing_chain() -> FuturesPricingChain:
 __all__ = [
     "FuturesPriceSource",
     "FuturesPricingChain",
+    "configure_futures_pricing",
     "get_default_pricing_chain",
 ]

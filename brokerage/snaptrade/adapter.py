@@ -28,6 +28,7 @@ from brokerage.snaptrade.connections import (
     refresh_brokerage_authorization,
 )
 from brokerage.snaptrade.recovery import _try_rotate_secret
+from brokerage.snaptrade.rate_limit import _unconfigured_trade_limiter
 from brokerage.snaptrade.trading import (
     cancel_snaptrade_order,
     get_snaptrade_orders,
@@ -69,6 +70,8 @@ class SnapTradeBrokerAdapter(BrokerAdapter):
         on_secret_rotated: Callable[[str], None] | None = None,
         refresh_secret: Callable[[], str | None] | None = None,
         on_refresh: Callable[[str], None] | None = None,
+        *,
+        trade_limiter: Callable[[str, Callable[[], Any]], Any] = _unconfigured_trade_limiter,
     ) -> None:
         self._user_email = user_email
         if not user_secret:
@@ -77,6 +80,7 @@ class SnapTradeBrokerAdapter(BrokerAdapter):
         self._region = region
         self._user_id = user_id
         self._snaptrade_client = snaptrade_client
+        self._trade_limiter = trade_limiter
         self._accounts_cache: Optional[List[Dict[str, Any]]] = None
         self._accounts_cache_at: Optional[datetime] = None
         self._on_secret_rotated = on_secret_rotated
@@ -304,6 +308,7 @@ class SnapTradeBrokerAdapter(BrokerAdapter):
             account_id=account_id,
             snaptrade_trade_id=snaptrade_trade_id,
             wait_to_confirm=bool(order_params.get("wait_to_confirm", True)),
+            trade_limiter=self._trade_limiter,
             on_secret_rotated=self._handle_secret_rotated,
             refresh_secret=self._refresh_secret,
             budget_user_id=self._user_id,
@@ -393,6 +398,7 @@ class SnapTradeBrokerAdapter(BrokerAdapter):
             user_secret=self._user_secret,
             account_id=account_id,
             order_id=order_id,
+            trade_limiter=self._trade_limiter,
             on_secret_rotated=self._handle_secret_rotated,
             refresh_secret=self._refresh_secret,
             budget_user_id=self._user_id,

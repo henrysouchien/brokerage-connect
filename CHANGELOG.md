@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.4 (2026-09-15)
+
+- Removed all Risk-checkout imports, including hidden logger, budget, settings, ticker, reference-data, and cache-root discovery. Applications explicitly supply their policies; the source and published wheel now have the same dependency boundary.
+- Standalone budget calls execute directly with no application billing rates. Risk's existing bootstrap supplies its guard, rates, logging, cache root, Flex ticker resolver, and FMP pricing factory; Risk futures lookups retain database-first reference-data behavior through their application adapter.
+- SnapTrade connection redirects accept `frontend_base_url`; trading accepts the host's account-keyed distributed `trade_limiter`. Missing standalone trading coordination still refuses submission.
+- IBKR account authorization accepts `authorized_accounts`. Flex imports no longer eagerly require provider extras; SDK construction remains worker-thread safe. Futures YAML parsing is a declared base dependency.
+- Bundled futures metadata works without Risk. FMP futures sources accept pricing/currency callables; applications configure FMP-first pricing, while standalone pricing uses only its configured sources and IBKR.
+
 ## 0.6.3 (2026-09-15)
 
 - Configuration is process-environment only; the package no longer reads a checkout-relative `.env` (the launcher owns dotenv loading).
@@ -21,4 +29,4 @@
 
 - SnapTrade, Plaid, and Schwab provider clients now support standalone wheel installs via `brokerage-connect[snaptrade]`, `brokerage-connect[plaid]`, and `brokerage-connect[schwab]` without requiring the risk_module monorepo on `PYTHONPATH`.
 - The sync workflow vendors the stdlib-only API budget exception and cost-table helpers into `brokerage._shared` for the published package.
-- IBKR remains monorepo-only in this release. The `[ibkr]` extra still installs the SDK for monorepo callers, but `brokerage.ibkr.adapter` is not standalone-importable because it still depends on `app_platform`, `options`, `providers.routing_config`, and sibling `ibkr.*` modules. See `docs/planning/BROKERAGE_CONNECT_VENDOR_API_BUDGET_PLAN.md` for the scoped follow-up rationale.
+- Historical 0.5.0 limitation: IBKR required the monorepo in that release. This does not describe the current package; 0.6.4 removes the remaining checkout imports and verifies every shipped module with only declared dependencies.

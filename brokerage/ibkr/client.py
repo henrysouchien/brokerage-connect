@@ -9,8 +9,8 @@ Agent orientation:
 
 from __future__ import annotations
 
-import importlib
 from dataclasses import asdict
+from collections.abc import Iterable
 from typing import Any
 
 import pandas as pd
@@ -51,10 +51,15 @@ class IBKRClient:
         client_id: int | None = None,
         *,
         budget_user_id: int | None = None,
+        authorized_accounts: Iterable[str] | None = None,
     ) -> None:
         self._market_data = IBKRMarketDataClient(host=host, port=port, client_id=client_id)
         self._conn_manager = IBKRConnectionManager()
         self._budget_user_id = budget_user_id
+        self._authorized_accounts = (
+            IBKR_AUTHORIZED_ACCOUNTS if authorized_accounts is None
+            else [str(account) for account in authorized_accounts if str(account).strip()]
+        )
 
     def _effective_budget_user_id(self, budget_user_id: int | None) -> int | None:
         if budget_user_id is not None:
@@ -76,14 +81,7 @@ class IBKRClient:
 
     def _resolve_account_id(self, ib, account_id: str | None = None) -> str:
         """Resolve account_id with authorization filtering and ambiguity checks."""
-        authorized_accounts = list(IBKR_AUTHORIZED_ACCOUNTS)
-        try:
-            settings_module = importlib.import_module("settings")
-            configured_accounts = getattr(settings_module, "IBKR_AUTHORIZED_ACCOUNTS", None)
-            if isinstance(configured_accounts, list):
-                authorized_accounts = [str(account) for account in configured_accounts if str(account).strip()]
-        except Exception:
-            pass
+        authorized_accounts = self._authorized_accounts
 
         if account_id:
             normalized_account_id = str(account_id).strip()
@@ -364,6 +362,7 @@ def get_ibkr_client(
     *,
     client_id: int | None = None,
     budget_user_id: int | None = None,
+    authorized_accounts: Iterable[str] | None = None,
 ) -> IBKRClient:
     """Return a fresh IBKR facade instance.
 
@@ -378,9 +377,11 @@ def get_ibkr_client(
       ``IBKRClient``.
     """
 
-    init_kwargs: dict[str, int] = {}
+    init_kwargs: dict[str, Any] = {}
     if client_id is not None:
         init_kwargs["client_id"] = client_id
     if budget_user_id is not None:
         init_kwargs["budget_user_id"] = budget_user_id
+    if authorized_accounts is not None:
+        init_kwargs["authorized_accounts"] = authorized_accounts
     return IBKRClient(**init_kwargs)

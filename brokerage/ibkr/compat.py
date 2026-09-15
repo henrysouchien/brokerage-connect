@@ -10,6 +10,7 @@ Agent orientation:
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from functools import lru_cache
 import math
@@ -19,6 +20,8 @@ from typing import Any, Union
 
 import pandas as pd
 import yaml
+
+from brokerage.futures import FuturesContractSpec
 
 from .exceptions import (
     IBKRAccountError,
@@ -62,12 +65,15 @@ def _load_ibkr_exchange_mappings() -> dict[str, Any]:
     return payload
 
 
-def get_ibkr_futures_fmp_map() -> dict[str, str]:
-    """Return IBKR-routable futures-root -> FMP symbol mappings."""
+def get_ibkr_futures_fmp_map(
+    *,
+    spec_loader: Callable[[], Mapping[str, FuturesContractSpec]] | None = None,
+) -> dict[str, str]:
+    """Return IBKR-routable price aliases; default to the bundled catalog."""
     from brokerage.futures import load_contract_specs
 
     ibkr_routing = get_ibkr_futures_exchanges()
-    all_specs = load_contract_specs()
+    all_specs = (spec_loader if spec_loader is not None else load_contract_specs)()
 
     out: dict[str, str] = {}
     for symbol, spec in all_specs.items():
@@ -98,12 +104,15 @@ def get_ibkr_futures_exchanges() -> dict[str, dict[str, str]]:
     return out
 
 
-def get_ibkr_futures_contract_meta() -> dict[str, dict[str, Any]]:
-    """Return IBKR-routable futures metadata from the canonical futures catalog."""
+def get_ibkr_futures_contract_meta(
+    *,
+    spec_loader: Callable[[], Mapping[str, FuturesContractSpec]] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Return IBKR-routable metadata from the supplied or bundled catalog."""
     from brokerage.futures import load_contract_specs
 
     ibkr_routing = get_ibkr_futures_exchanges()
-    all_specs = load_contract_specs()
+    all_specs = (spec_loader if spec_loader is not None else load_contract_specs)()
 
     out: dict[str, dict[str, Any]] = {}
     for symbol, spec in all_specs.items():
@@ -118,14 +127,19 @@ def get_ibkr_futures_contract_meta() -> dict[str, dict[str, Any]]:
     return out
 
 
-def get_futures_currency(symbol: str) -> str:
-    """Return settlement currency for a futures root symbol."""
+def get_futures_currency(
+    symbol: str,
+    *,
+    spec_loader: Callable[[], Mapping[str, FuturesContractSpec]] | None = None,
+) -> str:
+    """Return settlement currency from the supplied or bundled catalog."""
     key = str(symbol or "").strip().upper()
     if not key:
         raise IBKRContractError("Futures symbol is required")
-    from brokerage.futures import get_contract_spec
+    from brokerage.futures import load_contract_specs
 
-    spec = get_contract_spec(key)
+    specs = (spec_loader if spec_loader is not None else load_contract_specs)()
+    spec = specs.get(key)
     if spec is None:
         raise IBKRContractError(
             f"Futures contract metadata is required for {key}"

@@ -7,17 +7,7 @@ import inspect
 import sys
 from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
 
-try:
-    from app_platform.api_budget import guard_call
-except ModuleNotFoundError as e:
-    # Only fall back when app_platform itself or its api_budget submodule is unavailable
-    # (dist runtime). Re-raise if a transitive import inside app_platform.api_budget fails —
-    # those represent monorepo bugs that must surface, not silently disable budget enforcement.
-    if e.name not in {"app_platform", "app_platform.api_budget"}:
-        raise
-    def guard_call(*, fn, args=(), kwargs=None, **_):
-        """No-op fallback when app_platform.api_budget isn't installed (dist runtime)."""
-        return fn(*args, **(kwargs or {}))
+from brokerage._shared.budget_guard import guard_call
 
 from brokerage._logging import log_error, portfolio_logger
 from brokerage.snaptrade._shared import (
@@ -30,7 +20,7 @@ from brokerage.snaptrade._shared import (
 )
 from brokerage.config import SNAPTRADE_CLIENT_ID, SNAPTRADE_CONSUMER_KEY
 from brokerage._shared.api_budget_costs import COST_PER_CALL
-from brokerage.snaptrade.rate_limit import run_account_trade_slot
+from brokerage.snaptrade.rate_limit import _unconfigured_trade_limiter
 
 _DARWIN_REST_TIMEOUT_SECONDS = 30
 _DARWIN_TIMEOUT_INSTALLED_ATTR = "_risk_module_darwin_timeout_installed"
@@ -524,6 +514,8 @@ def _place_order_with_retry(
     trade_id: str,
     wait_to_confirm: bool = True,
     budget_user_id: int | None = None,
+    *,
+    trade_limiter: Callable[[str, Callable[[], Any]], Any] = _unconfigured_trade_limiter,
 ):
     def _do_sdk():
         return client.trading.place_order(
@@ -538,7 +530,7 @@ def _place_order_with_retry(
         operation="trading.place_order",
         budget_user_id=budget_user_id,
         cost_per_call=_snaptrade_cost_per_call("trading.place_order"),
-        fn=lambda: run_account_trade_slot(account_id, _do_sdk),
+        fn=lambda: trade_limiter(account_id, _do_sdk),
         kwargs={},
     )
 
@@ -577,6 +569,8 @@ def _cancel_order_with_retry(
     account_id: str,
     brokerage_order_id: str,
     budget_user_id: int | None = None,
+    *,
+    trade_limiter: Callable[[str, Callable[[], Any]], Any] = _unconfigured_trade_limiter,
 ):
     def _do_sdk():
         return client.trading.cancel_order(
@@ -591,7 +585,7 @@ def _cancel_order_with_retry(
         operation="trading.cancel_order",
         budget_user_id=budget_user_id,
         cost_per_call=_snaptrade_cost_per_call("trading.cancel_order"),
-        fn=lambda: run_account_trade_slot(account_id, _do_sdk),
+        fn=lambda: trade_limiter(account_id, _do_sdk),
         kwargs={},
     )
 

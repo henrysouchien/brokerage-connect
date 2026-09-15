@@ -5,6 +5,15 @@ from __future__ import annotations
 import logging
 import sys
 import time
+from collections.abc import Callable
+
+_timing_logger: Callable[[str, str, float], object] | None = None
+
+
+def configure_timing(*, log_timing_event: Callable[[str, str, float], object]) -> None:
+    """Bind the application's timing event sink before IBKR operations."""
+    global _timing_logger
+    _timing_logger = log_timing_event
 
 logger = logging.getLogger("ibkr")
 
@@ -43,10 +52,8 @@ class TimingContext:
 
     def __exit__(self, *args):
         self.elapsed_ms = round((time.monotonic() - self.start) * 1000, 1)
-        if self.name:
+        if self.name and _timing_logger is not None:
             try:
-                from app_platform.logging.core import log_timing_event
-
-                log_timing_event("dependency", self.name, self.elapsed_ms)
+                _timing_logger("dependency", self.name, self.elapsed_ms)
             except Exception:
                 pass

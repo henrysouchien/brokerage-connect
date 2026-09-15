@@ -1,59 +1,36 @@
-"""Brokerage package-local logging shims with monorepo fallback behavior."""
+"""Package-local logging; applications own handler setup and event delivery."""
 
 from __future__ import annotations
 
 import logging
-import sys
 from typing import Any
 
-
-def _make_fallback_logger(name: str) -> logging.Logger:
-    logger = logging.getLogger(f"brokerage.{name}")
-    if not logger.handlers:
-        handler = logging.StreamHandler(sys.stderr)
-        handler.setFormatter(logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s"))
-        logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
-    return logger
+portfolio_logger = logging.getLogger("brokerage.portfolio")
+trading_logger = logging.getLogger("brokerage.trading")
+plaid_logger = logging.getLogger("brokerage.plaid")
 
 
-try:
-    from utils.logging import (
-        log_alert,
-        log_critical_alert,
-        log_error,
-        log_event,
-        log_portfolio_operation,
-        log_service_health,
-        plaid_logger,
-        portfolio_logger,
-        trading_logger,
+def log_error(source: str, message: str, exc: Any = None, **details: Any) -> None:
+    portfolio_logger.warning(
+        "[%s] %s exception_type=%s", source, message, type(exc).__name__ if exc else None
     )
-except Exception:
-    portfolio_logger = _make_fallback_logger("portfolio")
-    trading_logger = _make_fallback_logger("trading")
-    plaid_logger = _make_fallback_logger("plaid")
 
-    def log_error(module: str, operation: str, error: Any, **kwargs: Any) -> None:
-        portfolio_logger.warning(
-            "[%s:%s] %s (extra=%s)",
-            module,
-            operation,
-            error,
-            kwargs,
-        )
 
-    def log_portfolio_operation(operation: str, details: Any) -> None:
-        portfolio_logger.info("[%s] %s", operation, details)
+def log_event(event_type: str, message: str, **details: Any) -> None:
+    portfolio_logger.info("[%s] %s", event_type, message)
 
-    def log_critical_alert(*args: Any, **kwargs: Any) -> None:
-        return None
 
-    def log_service_health(*args: Any, **kwargs: Any) -> None:
-        return None
+def log_portfolio_operation(operation: str, portfolio_data: Any, **details: Any) -> None:
+    log_event("portfolio_operation", operation, **details)
 
-    def log_alert(*args: Any, **kwargs: Any) -> None:
-        return None
 
-    def log_event(*args: Any, **kwargs: Any) -> None:
-        return None
+def log_alert(alert_type: str, severity: str, message: str, **details: Any) -> None:
+    portfolio_logger.warning("[%s:%s] %s", alert_type, severity, message)
+
+
+def log_critical_alert(alert_type: str, severity: str, message: str, **details: Any) -> None:
+    portfolio_logger.critical("[%s:%s] %s", alert_type, severity, message)
+
+
+def log_service_health(service_name: str, status: str, **details: Any) -> None:
+    portfolio_logger.info("[%s] %s", service_name, status)

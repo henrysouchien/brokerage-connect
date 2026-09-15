@@ -15,17 +15,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-try:
-    from app_platform.api_budget import guard_call
-except ModuleNotFoundError as e:
-    # Only fall back when app_platform itself or its api_budget submodule is unavailable
-    # (dist runtime). Re-raise if a transitive import inside app_platform.api_budget fails —
-    # those represent monorepo bugs that must surface, not silently disable budget enforcement.
-    if e.name not in {"app_platform", "app_platform.api_budget"}:
-        raise
-    def guard_call(*, fn, args=(), kwargs=None, **_):
-        """No-op fallback when app_platform.api_budget isn't installed (dist runtime)."""
-        return fn(*args, **(kwargs or {}))
+from brokerage._shared.budget_guard import guard_call
 
 from brokerage._logging import portfolio_logger
 from brokerage.config import (

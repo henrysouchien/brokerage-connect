@@ -1,46 +1,37 @@
-"""Host-first shim for API budget guard calls.
+"""Optional host API-budget enforcement, configured by the application's bootstrap.
 
-Preserves monorepo budget enforcement; standalone installs fall back to
-executing the wrapped function without tracking.
+Standalone calls execute directly. Applications that enforce budgets inject their
+own guard before using any provider client; the package never discovers a host.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from decimal import Decimal
 from typing import Any
 
-try:
-    from app_platform.api_budget import guard_call as _host_guard_call  # type: ignore[import-not-found]
-
-    guard_call = _host_guard_call
-except ImportError:
-
-    def guard_call(
-        *,
-        provider: str,
-        operation: str,
-        fn: Callable[..., Any],
-        args: tuple[Any, ...] = (),
-        kwargs: dict[str, Any] | None = None,
-        budget_user_id: int | None = None,
-        account_id: str | None = None,
-        caller: str | None = None,
-        cost_fn: Callable[[Any], Any] | None = None,
-        cost_per_call: Decimal | float | int | str | None = None,
-        item_id: str | None = None,
-    ) -> Any:
-        del (
-            provider,
-            operation,
-            budget_user_id,
-            account_id,
-            caller,
-            cost_fn,
-            cost_per_call,
-            item_id,
-        )
-        return fn(*args, **(kwargs or {}))
+from .api_budget_costs import COST_PER_CALL
 
 
-__all__ = ["guard_call"]
+def _unguarded_call(*, fn: Callable[..., Any], args=(), kwargs=None, **_: Any) -> Any:
+    return fn(*args, **(kwargs or {}))
+
+
+_guard: Callable[..., Any] = _unguarded_call
+
+
+def configure_budget(
+    *,
+    guard: Callable[..., Any],
+    cost_per_call: Mapping[tuple[str, str], Decimal],
+) -> None:
+    """Bind the host's budget guard and rates once, before provider use."""
+    global _guard
+    _guard = guard
+    COST_PER_CALL.clear()
+    COST_PER_CALL.update(cost_per_call)
+
+
+def guard_call(**kwargs: Any) -> Any:
+    """Execute a provider operation under the configured application policy."""
+    return _guard(**kwargs)

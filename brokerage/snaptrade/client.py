@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import functools
+import inspect
+import sys
 from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
 
 try:
@@ -28,6 +30,10 @@ from brokerage.snaptrade._shared import (
 )
 from brokerage.config import SNAPTRADE_CLIENT_ID, SNAPTRADE_CONSUMER_KEY
 from brokerage._shared.api_budget_costs import COST_PER_CALL
+from brokerage.snaptrade.rate_limit import run_account_trade_slot
+
+_DARWIN_REST_TIMEOUT_SECONDS = 30
+_DARWIN_TIMEOUT_INSTALLED_ATTR = "_risk_module_darwin_timeout_installed"
 
 if TYPE_CHECKING:
     from snaptrade_client import SnapTrade
@@ -41,6 +47,55 @@ else:
 
         class SnapTrade:  # type: ignore[no-redef]
             pass
+
+
+def _timeout_arg_index(fn: Callable[..., Any]) -> int | None:
+    try:
+        parameters = list(inspect.signature(fn).parameters)
+    except (TypeError, ValueError):
+        return None
+    try:
+        return parameters.index("timeout")
+    except ValueError:
+        return None
+
+
+def _install_darwin_snaptrade_timeout(client: SnapTrade) -> None:
+    if sys.platform != "darwin":
+        return
+
+    rest_client = getattr(
+        getattr(getattr(client, "account_information", None), "api_client", None),
+        "rest_client",
+        None,
+    )
+    if rest_client is None or not hasattr(rest_client, "request"):
+        portfolio_logger.warning("SnapTrade REST client unavailable; macOS timeout not installed")
+        return
+    if getattr(rest_client, _DARWIN_TIMEOUT_INSTALLED_ATTR, False):
+        return
+
+    original_request = rest_client.request
+    timeout_index = _timeout_arg_index(original_request)
+
+    @functools.wraps(original_request)
+    def request_with_default_timeout(*args, **kwargs):
+        args_for_call = args
+        kwargs_for_call = kwargs
+        if "timeout" in kwargs:
+            if kwargs["timeout"] is None:
+                kwargs_for_call = {**kwargs, "timeout": _DARWIN_REST_TIMEOUT_SECONDS}
+        elif timeout_index is not None and len(args) > timeout_index:
+            if args[timeout_index] is None:
+                args_list = list(args)
+                args_list[timeout_index] = _DARWIN_REST_TIMEOUT_SECONDS
+                args_for_call = tuple(args_list)
+        else:
+            kwargs_for_call = {**kwargs, "timeout": _DARWIN_REST_TIMEOUT_SECONDS}
+        return original_request(*args_for_call, **kwargs_for_call)
+
+    rest_client.request = request_with_default_timeout
+    setattr(rest_client, _DARWIN_TIMEOUT_INSTALLED_ATTR, True)
 
 
 def get_snaptrade_client(region_name: str = "us-east-1") -> Optional[SnapTrade]:
@@ -57,6 +112,7 @@ def get_snaptrade_client(region_name: str = "us-east-1") -> Optional[SnapTrade]:
             consumer_key=SNAPTRADE_CONSUMER_KEY,
             client_id=SNAPTRADE_CLIENT_ID,
         )
+        _install_darwin_snaptrade_timeout(client)
         portfolio_logger.info("✅ SnapTrade client initialized successfully")
         return client
     except Exception as e:
@@ -464,22 +520,26 @@ def _place_order_with_retry(
     client: SnapTrade,
     user_id: str,
     user_secret: str,
+    account_id: str,
     trade_id: str,
     wait_to_confirm: bool = True,
     budget_user_id: int | None = None,
 ):
+    def _do_sdk():
+        return client.trading.place_order(
+            user_id=user_id,
+            user_secret=user_secret,
+            trade_id=trade_id,
+            wait_to_confirm=wait_to_confirm,
+        )
+
     return guard_call(
         provider="snaptrade",
         operation="trading.place_order",
         budget_user_id=budget_user_id,
         cost_per_call=_snaptrade_cost_per_call("trading.place_order"),
-        fn=client.trading.place_order,
-        kwargs={
-            "user_id": user_id,
-            "user_secret": user_secret,
-            "trade_id": trade_id,
-            "wait_to_confirm": wait_to_confirm,
-        },
+        fn=lambda: run_account_trade_slot(account_id, _do_sdk),
+        kwargs={},
     )
 
 
@@ -518,18 +578,21 @@ def _cancel_order_with_retry(
     brokerage_order_id: str,
     budget_user_id: int | None = None,
 ):
+    def _do_sdk():
+        return client.trading.cancel_order(
+            user_id=user_id,
+            user_secret=user_secret,
+            account_id=account_id,
+            brokerage_order_id=brokerage_order_id,
+        )
+
     return guard_call(
         provider="snaptrade",
         operation="trading.cancel_order",
         budget_user_id=budget_user_id,
         cost_per_call=_snaptrade_cost_per_call("trading.cancel_order"),
-        fn=client.trading.cancel_order,
-        kwargs={
-            "user_id": user_id,
-            "user_secret": user_secret,
-            "account_id": account_id,
-            "brokerage_order_id": brokerage_order_id,
-        },
+        fn=lambda: run_account_trade_slot(account_id, _do_sdk),
+        kwargs={},
     )
 
 

@@ -1,9 +1,15 @@
 # Changelog
 
+## 0.6.2 (2026-09-15)
+
+- Published from the source-owned tree: in-package IBKR adapter, endpoints and relay state machine ship in the wheel; the [ibkr] extra no longer depends on interactive-brokers-mcp (supersedes the 0.6.0/0.6.1 public wheels built from the stale dist).
+- **Schwab adapter trade-integrity fix** (commit `4a689fd8`, 2026-05-28). `_extract_order_id` and `_response_as_dict` now accept any `collections.abc.Mapping` (including `httpx.Headers` from schwab-py) instead of requiring `isinstance(dict)`, fixing a latent bug where successful Schwab orders silently dropped the `brokerage_order_id` because schwab-py returns `httpx.Headers` (not a dict subclass). Schwab's place-order success only carries the order ID in the `Location` header per the schwab-py SDK contract. `_extract_order_id` now uses the canonical schwab-py regex (`r"https://api\.schwabapi\.com/trader/v1/accounts/(\w+)/orders/(\d+)"`) — no last-path-segment fallback. **Behavior change**: `SchwabBrokerAdapter.place_order` now raises `RuntimeError` when Schwab returns a non-`{200,201,202,204}` status OR a success-shaped response without an extractable `brokerage_order_id`. Callers that previously received `OrderResult(brokerage_order_id=None, status="ACCEPTED")` will now see the RuntimeError; the `services/trade_execution_service` orchestrator already handles this by rolling back the preview to `cancelled` and inserting a FAILED row with `error_message`. Same trade-integrity invariant needs to be applied to IBKR + SnapTrade adapters separately (see `risk_module/docs/TODO.md` row `OtherAdapters-TradeIntegrity-Audit`).
+
 ## 0.6.0 - 2026-05-03
 
 - IBKR is now standalone-installable via `brokerage-connect[ibkr]`; `from brokerage.ibkr.adapter import IBKRBrokerAdapter` works without the risk_module monorepo on `PYTHONPATH`.
-- The `[ibkr]` extra now depends on `interactive-brokers-mcp>=0.2.4`, which brings the sibling `ibkr.*` modules and a heavier opt-in dependency tree.
+- The `[ibkr]` extra now carries the IBKR client modules directly under `brokerage.ibkr` instead of depending on `interactive-brokers-mcp`.
+- Added standalone `_shared` shims for IBKR budget guarding and time-series caching.
 - Added standalone `brokerage.options_types.OptionLeg` and `OptionStrategy` shapes for adapter option-trade flows.
 - `IBKRBrokerAdapter` now accepts `account_map=` for aggregator-to-native account routing and falls back to parsing `TRADE_ACCOUNT_MAP` from the environment.
 

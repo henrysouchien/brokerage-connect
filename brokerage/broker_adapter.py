@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     import pandas as pd
 
     from brokerage.options_types import OptionStrategy
-    from ibkr.contract_spec import IBKRContractSpec
+    from brokerage.ibkr.contract_spec import IBKRContractSpec
 
 
 class BrokerAdapter(ABC):
@@ -31,7 +31,7 @@ class BrokerAdapter(ABC):
 
     Contract semantics:
     - Methods should raise clear exceptions on broker-side errors.
-    - Returned dataclasses in ``core.trade_objects`` must be populated with
+    - Returned dataclasses in ``brokerage.trade_objects`` must be populated with
       broker-native details in ``broker_data`` where available.
     """
 
@@ -49,7 +49,12 @@ class BrokerAdapter(ABC):
         """List tradeable accounts managed by this broker."""
 
     @abstractmethod
-    def search_symbol(self, account_id: str, ticker: str) -> Dict[str, Any]:
+    def search_symbol(
+        self,
+        account_id: str,
+        ticker: str,
+        currency: str,
+    ) -> Dict[str, Any]:
         """Resolve a ticker symbol for the given account."""
 
     @abstractmethod
@@ -57,6 +62,7 @@ class BrokerAdapter(ABC):
         self,
         account_id: str,
         ticker: str,
+        currency: str,
         side: str,
         quantity: float,
         order_type: str,
@@ -118,6 +124,17 @@ class BrokerAdapter(ABC):
         budget_user_id: int | None = None,
     ) -> pd.DataFrame:
         """Fetch live broker positions for safety validation."""
+
+    def get_portfolio_with_cash(
+        self,
+        account_id: str,
+        *,
+        budget_user_id: int | None = None,
+    ) -> tuple[pd.DataFrame, dict[str, float]]:
+        """Return positions and cash balances for the given account."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement get_portfolio_with_cash"
+        )
 
     @abstractmethod
     def query_open_orders(

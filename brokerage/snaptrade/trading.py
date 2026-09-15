@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, List, Optional
 
 from brokerage._logging import log_error
+from brokerage.trade_objects import estimate_order_cash_total
 from brokerage.snaptrade._shared import _budget_kwargs, _extract_snaptrade_body, _to_float
 from brokerage.snaptrade.client import (
     _call_with_secret_rotation,
@@ -182,7 +183,12 @@ def preview_snaptrade_order(
 
         estimated_total = None
         if estimated_price is not None:
-            estimated_total = (estimated_price * float(quantity)) + estimated_commission
+            estimated_total = estimate_order_cash_total(
+                side,
+                quantity,
+                estimated_price,
+                estimated_commission,
+            )
         elif estimated_commission > 0:
             estimated_total = estimated_commission
 
@@ -213,6 +219,7 @@ def preview_snaptrade_order(
 def place_snaptrade_checked_order(
     user_email: str,
     user_secret: str,
+    account_id: str,
     snaptrade_trade_id: str,
     wait_to_confirm: bool = True,
     *,
@@ -231,6 +238,7 @@ def place_snaptrade_checked_order(
                 client=client,
                 user_id=user_id,
                 user_secret=secret,
+                account_id=account_id,
                 trade_id=snaptrade_trade_id,
                 wait_to_confirm=wait_to_confirm,
                 **_budget_kwargs(budget_user_id),

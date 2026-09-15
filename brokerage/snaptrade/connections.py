@@ -49,11 +49,16 @@ def _normalize_payload_list(payload: Any) -> list[dict[str, Any]]:
 def create_snaptrade_connection_url(
     user_email: str,
     user_secret: str,
-    connection_type: str | None = None,
+    connection_type: str = "read",
     *,
     budget_user_id: int | None = None,
 ) -> str:
-    """Create a SnapTrade connection URL for account linking."""
+    """Create a SnapTrade connection URL for account linking.
+
+    Defaults to ``read`` so callers that do not explicitly request trading receive read-only
+    access. User-facing callers may pass ``trade-if-available`` after the user chooses to enable
+    trading where supported.
+    """
     client = _require_snaptrade_client()
 
     try:

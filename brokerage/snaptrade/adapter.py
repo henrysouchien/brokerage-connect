@@ -9,6 +9,7 @@ Calls into:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import math
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
@@ -41,7 +42,7 @@ if TYPE_CHECKING:
     import pandas as pd
 
     from brokerage.options_types import OptionStrategy
-    from ibkr.contract_spec import IBKRContractSpec
+    from brokerage.ibkr.contract_spec import IBKRContractSpec
 
 
 _ACCOUNTS_CACHE: Dict[str, Tuple[datetime, List[Dict[str, Any]]]] = {}
@@ -207,8 +208,15 @@ class SnapTradeBrokerAdapter(BrokerAdapter):
             )
         return out
 
-    def search_symbol(self, account_id: str, ticker: str) -> Dict[str, Any]:
-        return search_snaptrade_symbol(
+    def search_symbol(
+        self,
+        account_id: str,
+        ticker: str,
+        currency: str,
+    ) -> Dict[str, Any]:
+        if len(currency) != 3 or not currency.isalpha() or currency != currency.upper():
+            raise ValueError("currency must be an explicit uppercase ISO code")
+        result = search_snaptrade_symbol(
             user_email=self._user_email,
             user_secret=self._user_secret,
             account_id=account_id,
@@ -217,11 +225,14 @@ class SnapTradeBrokerAdapter(BrokerAdapter):
             refresh_secret=self._refresh_secret,
             budget_user_id=self._user_id,
         )
+        result["currency"] = currency
+        return result
 
     def preview_order(
         self,
         account_id: str,
         ticker: str,
+        currency: str,
         side: str,
         quantity: float,
         order_type: str,
@@ -231,6 +242,8 @@ class SnapTradeBrokerAdapter(BrokerAdapter):
         symbol_id: Optional[str] = None,
     ) -> OrderPreview:
         """Request broker-native preview/impact estimate from SnapTrade."""
+        if len(currency) != 3 or not currency.isalpha() or currency != currency.upper():
+            raise ValueError("currency must be an explicit uppercase ISO code")
         side_upper = str(side or "").upper().strip()
         if side_upper == "SHORT":
             raise ValueError(
@@ -288,27 +301,43 @@ class SnapTradeBrokerAdapter(BrokerAdapter):
         response_raw = place_snaptrade_checked_order(
             user_email=self._user_email,
             user_secret=self._user_secret,
+            account_id=account_id,
             snaptrade_trade_id=snaptrade_trade_id,
             wait_to_confirm=bool(order_params.get("wait_to_confirm", True)),
             on_secret_rotated=self._handle_secret_rotated,
             refresh_secret=self._refresh_secret,
             budget_user_id=self._user_id,
         )
-        response = response_raw if isinstance(response_raw, dict) else {}
+        if not isinstance(response_raw, Mapping):
+            raise RuntimeError(
+                "SnapTrade order placement returned a non-mapping response "
+                f"({type(response_raw).__name__}); cannot confirm the order was accepted. "
+                "The order MAY ALREADY BE LIVE at the brokerage; verify before retrying."
+            )
+        # Coerce to a real dict: OrderResult.broker_data is typed Dict[str, Any] and
+        # make_json_safe only recurses real dicts (a custom Mapping would not serialize).
+        response = dict(response_raw)
         brokerage_order_id = (
             response.get("brokerage_order_id")
             or response.get("order_id")
             or response.get("id")
         )
+        if brokerage_order_id is None or not str(brokerage_order_id).strip():
+            raise RuntimeError(
+                "SnapTrade order placement returned no brokerage order id "
+                f"(status={response.get('status')!r}); we cannot reference, cancel, or "
+                "reconcile it. The order MAY ALREADY BE LIVE at the brokerage; verify before "
+                "retrying."
+            )
         return OrderResult(
-            brokerage_order_id=str(brokerage_order_id) if brokerage_order_id is not None else None,
+            brokerage_order_id=str(brokerage_order_id),
             status=str(response.get("status") or "PENDING"),
             filled_quantity=_to_float(response.get("filled_quantity")),
             total_quantity=_to_float(response.get("total_quantity")),
             execution_price=_to_float(response.get("execution_price")),
             total_cost=_to_float(response.get("total_cost")),
             commission=_to_float(response.get("commission")),
-            broker_data=response if isinstance(response, dict) else None,
+            broker_data=response,
         )
 
     def get_orders(

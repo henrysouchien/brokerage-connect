@@ -23,7 +23,8 @@ from brokerage.trade_objects import (
 
 if TYPE_CHECKING:
     from brokerage.options_types import OptionStrategy
-    from ibkr.contract_spec import IBKRContractSpec
+
+    from .contract_spec import IBKRContractSpec
 
 
 class BrokerAdapterError(RuntimeError):
@@ -86,6 +87,9 @@ class IBKRRelayAdapter(BrokerAdapter):
 
     def bind_user_id(self, user_id: int) -> None:
         self._user_id = int(user_id)
+
+    def probe(self) -> dict[str, Any]:
+        return self._dispatch("ibkr.probe", {}, no_replay=False)
 
     def _dispatch(self, tool_name: str, tool_input: Dict[str, Any], *, no_replay: bool) -> Any:
         if self._user_id is None:
@@ -157,10 +161,15 @@ class IBKRRelayAdapter(BrokerAdapter):
         result = self._dispatch("ibkr.list_accounts", {}, no_replay=False)
         return _coerce_dataclass_list(BrokerAccount, result)
 
-    def search_symbol(self, account_id: str, ticker: str) -> Dict[str, Any]:
+    def search_symbol(
+        self,
+        account_id: str,
+        ticker: str,
+        currency: str,
+    ) -> Dict[str, Any]:
         result = self._dispatch(
             "ibkr.search_symbol",
-            {"account_id": account_id, "ticker": ticker},
+            {"account_id": account_id, "ticker": ticker, "currency": currency},
             no_replay=False,
         )
         return dict(result or {})
@@ -169,6 +178,7 @@ class IBKRRelayAdapter(BrokerAdapter):
         self,
         account_id: str,
         ticker: str,
+        currency: str,
         side: str,
         quantity: float,
         order_type: str,
@@ -182,6 +192,7 @@ class IBKRRelayAdapter(BrokerAdapter):
             {
                 "account_id": account_id,
                 "ticker": ticker,
+                "currency": currency,
                 "side": side,
                 "quantity": quantity,
                 "order_type": order_type,
@@ -260,6 +271,19 @@ class IBKRRelayAdapter(BrokerAdapter):
         )
         return list(result or [])
 
+    def fetch_snapshot(
+        self,
+        contracts: list[IBKRContractSpec | Any],
+        *,
+        budget_user_id: int | None = None,
+        **kwargs,
+    ) -> list[dict[str, Any]]:
+        return self.fetch_market_snapshot(
+            contracts=contracts,
+            budget_user_id=budget_user_id,
+            **kwargs,
+        )
+
     def get_live_positions(
         self,
         account_id: str | None = None,
@@ -274,6 +298,24 @@ class IBKRRelayAdapter(BrokerAdapter):
         if isinstance(result, pd.DataFrame):
             return result
         return pd.DataFrame(result or [])
+
+    def get_portfolio_with_cash(
+        self,
+        account_id: str,
+        *,
+        budget_user_id: int | None = None,
+    ) -> tuple[pd.DataFrame, dict[str, float]]:
+        payload = self._dispatch(
+            "ibkr.get_portfolio_with_cash",
+            {"account_id": account_id, "budget_user_id": budget_user_id},
+            no_replay=False,
+        )
+        if not isinstance(payload, (list, tuple)) or len(payload) != 2:
+            raise BrokerAdapterError(
+                f"relay_bad_payload:get_portfolio_with_cash:{type(payload).__name__}"
+            )
+        records, cash = payload
+        return (pd.DataFrame(records or []), dict(cash or {}))
 
     def query_open_orders(
         self,
@@ -300,6 +342,28 @@ class IBKRRelayAdapter(BrokerAdapter):
             no_replay=False,
         )
         return _coerce_dataclass_list(OrderStatus, result)
+
+    def get_option_chain(
+        self,
+        symbol: str,
+        currency: str,
+        sec_type: str = "STK",
+        exchange: str = "SMART",
+        *,
+        budget_user_id: int | None = None,
+    ) -> dict[str, Any]:
+        result = self._dispatch(
+            "ibkr.get_option_chain",
+            {
+                "symbol": symbol,
+                "currency": currency,
+                "sec_type": sec_type,
+                "exchange": exchange,
+                "budget_user_id": budget_user_id,
+            },
+            no_replay=False,
+        )
+        return dict(result or {})
 
     def preview_roll(
         self,

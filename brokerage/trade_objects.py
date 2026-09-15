@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, UTC
 from typing import Any, ClassVar, Dict, List, Optional
 
-from brokerage._vendor import make_json_safe
+from brokerage._vendor import make_json_safe, safe_float as _safe_float
 
 
 ALLOWED_ORDER_TYPES = ("Market", "Limit", "Stop", "StopLimit")
@@ -22,20 +22,30 @@ ALLOWED_TIME_IN_FORCE = ("Day", "GTC", "FOK", "IOC")
 ALLOWED_SIDES = ("BUY", "SELL", "SHORT", "COVER")
 
 
+def estimate_order_cash_total(
+    side: str,
+    quantity: Any,
+    estimated_price: Any,
+    estimated_commission: Any = None,
+) -> Optional[float]:
+    """Return the estimated cash cost/proceeds for a single-leg order."""
+    price = _safe_float(estimated_price)
+    quantity_num = _safe_float(quantity)
+    if price is None or quantity_num is None:
+        return None
+
+    gross_notional = abs(quantity_num) * price
+    commission = _safe_float(estimated_commission) or 0.0
+    side_key = str(side or "").strip().upper()
+    if side_key in {"SELL", "SHORT"}:
+        return gross_notional - commission
+    return gross_notional + commission
+
+
 def _iso(value: Optional[datetime]) -> Optional[str]:
     if isinstance(value, datetime):
         return value.isoformat()
     return value
-
-
-def _safe_float(value: Any) -> float | None:
-    """Coerce a value (for example Decimal from DB) to float, or None."""
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
 
 
 @dataclass
@@ -105,6 +115,8 @@ class TradePreviewResult:
     post_trade_weight: Optional[float] = None
     requires_confirmation: bool = True
     error: Optional[str] = None
+    error_code: Optional[str] = None
+    unsupported_instrument: Optional[Dict[str, Any]] = None
     broker_provider: Optional[str] = None
     market_data: Optional[Dict[str, Any]] = None
 
@@ -141,9 +153,15 @@ class TradePreviewResult:
                 "trade_impacts": self.trade_impacts,
                 "pre_trade_weight": self.pre_trade_weight,
                 "post_trade_weight": self.post_trade_weight,
-                "validation": self.validation.to_api_response() if self.validation else None,
+                "validation": self.validation.to_api_response()
+                if self.validation
+                else None,
             },
         }
+        if self.error_code:
+            payload["error_code"] = self.error_code
+        if self.unsupported_instrument:
+            payload["data"]["unsupported_instrument"] = self.unsupported_instrument
         return make_json_safe(payload)
 
     def to_formatted_report(self) -> str:
@@ -178,11 +196,15 @@ class TradePreviewResult:
             if spread.get("mid") is not None:
                 lines.append(f"  spread_mid: {spread['mid']:.4f}")
         if self.pre_trade_weight is not None and self.post_trade_weight is not None:
-            lines.append(f"- weight_change: {self.pre_trade_weight:.2%} -> {self.post_trade_weight:.2%}")
+            lines.append(
+                f"- weight_change: {self.pre_trade_weight:.2%} -> {self.post_trade_weight:.2%}"
+            )
         if self.validation:
             lines.append(self.validation.to_formatted_report())
         if self.error:
             lines.append(f"- error: {self.error}")
+        if self.error_code:
+            lines.append(f"- error_code: {self.error_code}")
         return "\n".join(lines)
 
 
@@ -208,6 +230,7 @@ class TradeExecutionResult:
     cancelled_at: Optional[datetime] = None
     message: Optional[str] = None
     error: Optional[str] = None
+    error_code: Optional[str] = None
     broker_provider: Optional[str] = None
     new_preview: Optional[TradePreviewResult] = None
 
@@ -238,9 +261,13 @@ class TradeExecutionResult:
                 "commission": self.commission,
                 "executed_at": _iso(self.executed_at),
                 "cancelled_at": _iso(self.cancelled_at),
-                "new_preview": self.new_preview.to_api_response() if self.new_preview else None,
+                "new_preview": self.new_preview.to_api_response()
+                if self.new_preview
+                else None,
             },
         }
+        if self.error_code:
+            payload["error_code"] = self.error_code
         return make_json_safe(payload)
 
     def to_formatted_report(self) -> str:
@@ -252,7 +279,9 @@ class TradeExecutionResult:
         if self.broker_provider:
             lines.append(f"- broker_provider: {self.broker_provider}")
         if self.account_id and self.ticker and self.side and self.quantity is not None:
-            lines.append(f"- order: {self.side} {self.quantity} {self.ticker} @ {self.account_id}")
+            lines.append(
+                f"- order: {self.side} {self.quantity} {self.ticker} @ {self.account_id}"
+            )
         if self.order_status:
             lines.append(f"- order_status: {self.order_status}")
         if self.filled_quantity is not None:
@@ -271,6 +300,8 @@ class TradeExecutionResult:
             lines.append(f"- message: {self.message}")
         if self.error:
             lines.append(f"- error: {self.error}")
+        if self.error_code:
+            lines.append(f"- error_code: {self.error_code}")
         if self.new_preview:
             lines.append("")
             lines.append("new_preview:")
@@ -316,11 +347,14 @@ class BrokerFillRecord:
         filled_at_raw = row.get("filled_at")
         filled_at_value = None
         if filled_at_raw is not None:
-            filled_at_value = (
-                filled_at_raw.isoformat()
-                if hasattr(filled_at_raw, "isoformat")
-                else str(filled_at_raw)
-            )
+            if isinstance(filled_at_raw, datetime) and filled_at_raw.tzinfo is None:
+                filled_at_value = filled_at_raw.replace(tzinfo=UTC).isoformat()
+            else:
+                filled_at_value = (
+                    filled_at_raw.isoformat()
+                    if hasattr(filled_at_raw, "isoformat")
+                    else str(filled_at_raw)
+                )
 
         return cls(
             ticker=row.get("ticker"),
@@ -582,6 +616,7 @@ __all__ = [
     "PreTradeValidation",
     "TradeExecutionResult",
     "TradePreviewResult",
+    "estimate_order_cash_total",
     "_iso",
     "_safe_float",
 ]

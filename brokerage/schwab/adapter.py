@@ -10,7 +10,9 @@ Calls into:
 from __future__ import annotations
 
 import math
+import re
 import time
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
@@ -29,20 +31,28 @@ except ModuleNotFoundError as e:
 from brokerage._logging import portfolio_logger
 from brokerage.broker_adapter import BrokerAdapter
 from brokerage.schwab.client import (
+    _extract_instrument_for_symbol,
     get_account_hashes,
     get_schwab_client,
     invalidate_schwab_caches,
     is_invalid_grant_error,
 )
 from brokerage.schwab.orders import build_equity_order_spec
-from brokerage.trade_objects import BrokerAccount, CancelResult, OrderPreview, OrderResult, OrderStatus
+from brokerage.trade_objects import (
+    BrokerAccount,
+    CancelResult,
+    OrderPreview,
+    OrderResult,
+    OrderStatus,
+    estimate_order_cash_total,
+)
 from brokerage._shared.api_budget_costs import COST_PER_CALL
 
 if TYPE_CHECKING:
     import pandas as pd
 
     from brokerage.options_types import OptionStrategy
-    from ibkr.contract_spec import IBKRContractSpec
+    from brokerage.ibkr.contract_spec import IBKRContractSpec
 
 
 SCHWAB_STATUS_MAP = {
@@ -58,6 +68,11 @@ SCHWAB_STATUS_MAP = {
 }
 
 _RETRY_DELAYS_SECONDS = (0.0, 0.5, 1.0, 2.0)
+
+# Canonical schwab-py extraction pattern (see schwab/utils.py).
+_ORDER_LOCATION_RE = re.compile(
+    r"https://api\.schwabapi\.com/trader/v1/accounts/(\w+)/orders/(\d+)"
+)
 
 
 def _schwab_cost_per_call(operation: str) -> Any:
@@ -137,17 +152,25 @@ def _status_from_response(response: Any) -> str:
 
 
 def _extract_order_id(response: Any, payload: Any = None) -> Optional[str]:
-    if isinstance(payload, dict):
+    # Body path (most adapters don't use this since Schwab returns no body
+    # per BaseClient.place_order docstring; kept for completeness).
+    if isinstance(payload, Mapping):
         for key in ("orderId", "order_id", "id"):
             value = payload.get(key)
             if value is not None and str(value).strip():
                 return str(value).strip()
 
+    # Header path (canonical for Schwab place_order). httpx.Headers is
+    # NOT a dict subclass but IS a Mapping. Plain dict still passes.
     headers = getattr(response, "headers", None)
-    if isinstance(headers, dict):
+    if isinstance(headers, Mapping):
         location = headers.get("Location") or headers.get("location")
         if location:
-            return str(location).rstrip("/").split("/")[-1]
+            m = _ORDER_LOCATION_RE.search(str(location))
+            if m:
+                return m.group(2)
+            # Non-canonical Location URL likely means a Schwab API change.
+            # Return None so place_order raises and operators investigate.
     return None
 
 
@@ -459,6 +482,43 @@ class SchwabBrokerAdapter(BrokerAdapter):
 
         return spec
 
+    def _assert_placeable_asset_type(self, symbol: str) -> None:
+        """Reject instruments we cannot build a valid Schwab equity order for.
+
+        Money-market / mutual funds (assetType MUTUAL_FUND) would get an equity
+        order spec and 500 at Schwab. ETFs/equities are EQUITY-placeable and pass.
+        Fail-safe: if the lookup fails or returns no assetType, do NOT block; fall
+        through. An unexpected type that 500s is still caught by the place_order
+        integrity RuntimeError, so no phantom. This guard can only add a friendly
+        early rejection; it never makes a placeable order fail.
+        """
+        sym = str(symbol or "").upper().strip()
+        if not sym:
+            return
+        asset_type = ""
+        try:
+            response = self._call_with_backoff(
+                get_schwab_client().get_instruments,
+                sym,
+                "symbol-search",
+                operation="get_instruments",
+            )
+            payload = _response_payload(response)
+            match = _extract_instrument_for_symbol(payload, sym)
+            if match:
+                asset_type = str(
+                    match.get("assetType") or match.get("assetMainType") or ""
+                ).strip().upper()
+        except Exception:
+            return
+        if asset_type == "MUTUAL_FUND":
+            raise ValueError(
+                f"{sym} is a mutual fund (assetType=MUTUAL_FUND). Schwab mutual-fund / "
+                "money-market fund orders fill at NAV and are not supported via this "
+                "adapter. Use a money-market ETF for the same cash exposure (e.g. SGOV, "
+                "BIL, JPST), or place the fund order directly in the Schwab UI."
+            )
+
     def owns_account(self, account_id: str) -> bool:
         mapping = self._account_hashes()
         account_id = str(account_id or "").strip()
@@ -506,8 +566,15 @@ class SchwabBrokerAdapter(BrokerAdapter):
             )
         return rows
 
-    def search_symbol(self, account_id: str, ticker: str) -> Dict[str, Any]:
+    def search_symbol(
+        self,
+        account_id: str,
+        ticker: str,
+        currency: str,
+    ) -> Dict[str, Any]:
         del account_id
+        if len(currency) != 3 or not currency.isalpha() or currency != currency.upper():
+            raise ValueError("currency must be an explicit uppercase ISO code")
         symbol = str(ticker or "").upper().strip()
         if not symbol:
             raise ValueError("ticker is required")
@@ -516,14 +583,13 @@ class SchwabBrokerAdapter(BrokerAdapter):
         instrument_data: dict[str, Any] = {}
         try:
             response = self._call_with_backoff(
-                client.search_instruments,
+                client.get_instruments,
                 symbol,
-                projection="symbol-search",
-                operation="search_instruments",
+                "symbol-search",
+                operation="get_instruments",
             )
             payload = _response_payload(response)
-            if isinstance(payload, dict):
-                instrument_data = payload.get(symbol) or {}
+            instrument_data = _extract_instrument_for_symbol(payload, symbol)
         except Exception:
             instrument_data = {}
 
@@ -540,6 +606,7 @@ class SchwabBrokerAdapter(BrokerAdapter):
             "universal_symbol_id": symbol,
             "broker_symbol_id": symbol,
             "last_price": quote_price,
+            "currency": currency,
             "instrument": instrument_data if isinstance(instrument_data, dict) else {},
         }
 
@@ -547,6 +614,7 @@ class SchwabBrokerAdapter(BrokerAdapter):
         self,
         account_id: str,
         ticker: str,
+        currency: str,
         side: str,
         quantity: float,
         order_type: str,
@@ -555,6 +623,8 @@ class SchwabBrokerAdapter(BrokerAdapter):
         stop_price: Optional[float] = None,
         symbol_id: Optional[str] = None,
     ) -> OrderPreview:
+        if len(currency) != 3 or not currency.isalpha() or currency != currency.upper():
+            raise ValueError("currency must be an explicit uppercase ISO code")
         account_hash = self._resolve_account_hash(account_id)
         symbol = str(symbol_id or ticker or "").upper().strip()
         if not symbol:
@@ -569,6 +639,8 @@ class SchwabBrokerAdapter(BrokerAdapter):
         if side_upper == "COVER":
             side = "COVER"
 
+        self._assert_placeable_asset_type(symbol)
+
         if limit_price is not None:
             estimated_price = float(limit_price)
         elif stop_price is not None:
@@ -579,7 +651,12 @@ class SchwabBrokerAdapter(BrokerAdapter):
         estimated_commission = 0.0
         estimated_total = None
         if estimated_price is not None:
-            estimated_total = (float(estimated_price) * float(quantity)) + estimated_commission
+            estimated_total = estimate_order_cash_total(
+                side,
+                quantity,
+                estimated_price,
+                estimated_commission,
+            )
 
         return OrderPreview(
             estimated_price=estimated_price,
@@ -622,6 +699,8 @@ class SchwabBrokerAdapter(BrokerAdapter):
         if quantity <= 0:
             raise ValueError("Quantity must be greater than zero")
 
+        self._assert_placeable_asset_type(ticker)
+
         order_spec = self._build_order_spec(
             ticker=ticker,
             side=side,
@@ -648,6 +727,20 @@ class SchwabBrokerAdapter(BrokerAdapter):
         payload = _response_payload(response)
         brokerage_order_id = _extract_order_id(response, payload)
         status = _status_from_response(response)
+
+        # Invariant: Schwab's place-order success contract is HTTP {200,201,202,204}
+        # WITH an order ID in the Location header. Any deviation means we cannot
+        # reference, cancel, or verify the order through our infra. The order may
+        # have been placed at Schwab; the operator must verify in the Schwab UI.
+        SUCCESS_STATUS_CODES = {200, 201, 202, 204}
+        if status_code not in SUCCESS_STATUS_CODES or brokerage_order_id is None:
+            raise RuntimeError(
+                "Schwab order placement returned an unexpected response: "
+                f"status_code={status_code} brokerage_order_id={brokerage_order_id!r}. "
+                "If status_code is 2xx, the order may have been placed at Schwab "
+                "under an ID we could not extract from the Location header. "
+                "Verify in the Schwab UI before retrying."
+            )
 
         execution_price = limit_price or stop_price or self._quote_price(ticker)
         total_cost = (execution_price * quantity) if execution_price is not None else None

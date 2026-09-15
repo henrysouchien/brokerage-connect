@@ -14,7 +14,7 @@ class IBKRFuturesPriceSource:
 
     def fetch_latest_price(self, symbol: str, alt_symbol: Optional[str] = None) -> Optional[float]:
         del alt_symbol
-        from ibkr.compat import fetch_ibkr_monthly_close
+        from brokerage.ibkr.compat import fetch_ibkr_monthly_close
 
         prices = fetch_ibkr_monthly_close(symbol, "2020-01-01", "2099-12-31")
         if prices is None or prices.empty or prices.dropna().empty:
@@ -29,7 +29,7 @@ class IBKRFuturesPriceSource:
         alt_symbol: Optional[str] = None,
     ) -> Optional[pd.Series]:
         del alt_symbol
-        from ibkr.compat import fetch_ibkr_monthly_close
+        from brokerage.ibkr.compat import fetch_ibkr_monthly_close
 
         prices = fetch_ibkr_monthly_close(symbol, start_date, end_date)
         if prices is None or prices.empty:

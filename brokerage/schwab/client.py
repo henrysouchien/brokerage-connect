@@ -10,6 +10,7 @@ import os
 import sys
 import time
 import types
+from collections.abc import Mapping
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,7 @@ from brokerage._shared.api_budget_costs import COST_PER_CALL
 
 _account_hash_cache: dict[str, str] | None = None
 _invalid_grant_cache: tuple[float, str] | None = None
+_invalid_grant_fingerprint: datetime | None = None
 _original_server_fn: Any = None
 _INVALID_GRANT_TTL_SECONDS = 300.0
 _RELOGIN_REQUIRED_MESSAGE = (
@@ -122,6 +124,29 @@ def _load_json_response(response: Any) -> Any:
     return None
 
 
+def _extract_instrument_for_symbol(payload: Any, symbol: str) -> dict[str, Any]:
+    """Return the best Schwab instrument match from a get_instruments payload."""
+    normalized_symbol = str(symbol or "").upper().strip()
+    if not normalized_symbol or not isinstance(payload, dict):
+        return {}
+
+    instruments = payload.get("instruments")
+    if not isinstance(instruments, list):
+        legacy_match = payload.get(normalized_symbol)
+        return legacy_match if isinstance(legacy_match, dict) else {}
+
+    first_instrument: dict[str, Any] | None = None
+    for item in instruments:
+        if not isinstance(item, dict):
+            continue
+        if first_instrument is None:
+            first_instrument = item
+        item_symbol = str(item.get("symbol") or "").upper().strip()
+        if item_symbol == normalized_symbol:
+            return item
+    return first_instrument or {}
+
+
 def _response_as_dict(response: Any) -> dict[str, Any]:
     payload = _load_json_response(response)
     if isinstance(payload, dict):
@@ -136,7 +161,7 @@ def _response_as_dict(response: Any) -> dict[str, Any]:
         result["status_code"] = status_code
 
     headers = getattr(response, "headers", None)
-    if isinstance(headers, dict) and headers and "headers" not in result:
+    if isinstance(headers, Mapping) and headers and "headers" not in result:
         result["headers"] = dict(headers)
 
     return result
@@ -176,9 +201,10 @@ def _get_cached_invalid_grant_message(force_refresh: bool = False) -> str | None
     return message
 
 
-def _cache_invalid_grant() -> None:
-    global _invalid_grant_cache
+def _cache_invalid_grant(fingerprint: datetime | None = None) -> None:
+    global _invalid_grant_cache, _invalid_grant_fingerprint
     _invalid_grant_cache = (time.monotonic(), _RELOGIN_REQUIRED_MESSAGE)
+    _invalid_grant_fingerprint = fingerprint
 
 
 def _token_written_at() -> datetime | None:
@@ -242,32 +268,47 @@ def _client_from_token_file() -> Any:
         return auth.client_from_token_file(token_path, SCHWAB_APP_KEY, SCHWAB_APP_SECRET)
 
 
-@functools.lru_cache(maxsize=1)
-def _get_or_create_client() -> Any:
+@functools.lru_cache(maxsize=2)
+def _get_or_create_client(_token_fingerprint: Any = None) -> Any:
+    # ``_token_fingerprint`` participates only in the cache key. When the Schwab token file
+    # changes (a UI or CLI re-auth writes a new token), the key changes and every worker rebuilds
+    # its client on the next call — fixing cross-worker staleness under multi-worker uvicorn.
     return _client_from_token_file()
 
 
 def get_schwab_client(force_refresh: bool = False) -> Any:
     """Return an authenticated schwab-py client (auto-refresh handled by schwab-py)."""
-    global _invalid_grant_cache
+    global _invalid_grant_cache, _invalid_grant_fingerprint
+
+    fingerprint = _token_written_at()
+    # If the token file advanced past the point where invalid_grant was cached, the operator
+    # re-authenticated (possibly in another worker) — drop the now-stale invalid_grant cache.
+    if (
+        _invalid_grant_cache is not None
+        and fingerprint is not None
+        and _invalid_grant_fingerprint is not None
+        and fingerprint > _invalid_grant_fingerprint
+    ):
+        _invalid_grant_cache = None
+        _invalid_grant_fingerprint = None
 
     cached_invalid_message = _get_cached_invalid_grant_message(force_refresh=force_refresh)
     if cached_invalid_message is not None:
         raise RuntimeError(cached_invalid_message)
 
     if not force_refresh and _refresh_token_expired_by_file_age():
-        _cache_invalid_grant()
+        _cache_invalid_grant(fingerprint)
         raise RuntimeError(_RELOGIN_REQUIRED_MESSAGE)
 
     try:
         if force_refresh:
             _get_or_create_client.cache_clear()
-        client = _get_or_create_client()
+        client = _get_or_create_client(fingerprint)
         _invalid_grant_cache = None
         return client
     except Exception as exc:
         if is_invalid_grant_error(exc):
-            _cache_invalid_grant()
+            _cache_invalid_grant(fingerprint)
             _raise_relogin_required(exc)
         raise
 
@@ -277,7 +318,7 @@ def _call_client_method(func: Any, /, *args: Any, **kwargs: Any) -> Any:
         return func(*args, **kwargs)
     except Exception as exc:
         if is_invalid_grant_error(exc):
-            _cache_invalid_grant()
+            _cache_invalid_grant(_token_written_at())
             _raise_relogin_required(exc)
         raise
 
@@ -579,22 +620,22 @@ def search_instruments(
     projection: str = "symbol-search",
     budget_user_id: int | None = None,
 ) -> dict[str, Any]:
-    """Return search payload for a symbol lookup."""
+    """Return a Schwab instrument lookup keyed by normalized symbol."""
     normalized_symbol = str(symbol or "").upper().strip()
     if not normalized_symbol:
         return {}
     client = get_schwab_client()
     response = guard_call(
         provider="schwab",
-        operation="search_instruments",
+        operation="get_instruments",
         budget_user_id=budget_user_id,
-        cost_per_call=_schwab_cost_per_call("search_instruments"),
+        cost_per_call=_schwab_cost_per_call("get_instruments"),
         fn=_call_client_method,
-        args=(client.search_instruments, normalized_symbol),
-        kwargs={"projection": projection},
+        args=(client.get_instruments, normalized_symbol, projection),
     )
     payload = _load_json_response(response)
-    return payload if isinstance(payload, dict) else {}
+    instrument = _extract_instrument_for_symbol(payload, normalized_symbol)
+    return {normalized_symbol: instrument} if instrument else {}
 
 
 def get_orders_for_account(
@@ -741,3 +782,72 @@ def invalidate_schwab_caches() -> None:
     _invalid_grant_cache = None
     _get_or_create_client.cache_clear()
     portfolio_logger.info("Cleared in-memory Schwab client/account-hash cache")
+
+
+def write_schwab_token(wrapped_token: Mapping[str, Any]) -> str:
+    """Atomically write a schwab-py metadata-wrapped token to the Schwab token path.
+
+    ``wrapped_token`` is the ``{"creation_timestamp", "token"}`` object that
+    ``schwab.auth.client_from_received_url`` hands to its ``token_write_func`` — write it AS-IS
+    (do NOT re-wrap, do NOT write the raw token) so ``client_from_token_file`` reads it back
+    unchanged. Used by the web OAuth reconnect route. Invalidates the in-process client cache
+    after writing (other workers pick up the new token via the token-file fingerprint cache key).
+    """
+    token_path = _token_path()
+    parent = os.path.dirname(token_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    tmp_path = f"{token_path}.tmp.{os.getpid()}"
+    # Create the temp file 0600 from the start (independent of umask), so the shared refresh token
+    # is never group/world-readable — not even briefly, and not if the process dies before replace.
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(dict(wrapped_token), handle)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    os.replace(tmp_path, token_path)  # atomic; destination inherits the 0600 temp-file mode
+    try:
+        os.chmod(token_path, 0o600)
+    except OSError:
+        pass
+    invalidate_schwab_caches()
+    return token_path
+
+
+def build_schwab_auth_context(callback_url: str, state: str | None = None) -> Any:
+    """schwab-py ``get_auth_context`` — returns ``AuthContext(callback_url, authorization_url, state)``.
+
+    Used by the web OAuth reconnect ``/start`` to build the Schwab authorize URL.
+    """
+    if not SCHWAB_APP_KEY:
+        raise ValueError("Missing SCHWAB_APP_KEY in environment")
+    auth = _load_schwab_auth_module()
+    return auth.get_auth_context(SCHWAB_APP_KEY, callback_url, state=state)
+
+
+def complete_schwab_web_oauth(callback_url: str, state: str, received_url: str) -> str:
+    """Exchange a Schwab OAuth redirect URL for a token, persisting it via ``write_schwab_token``.
+
+    Rebuilds the ``AuthContext`` from the stored ``callback_url`` + ``state`` (the authorize URL is
+    not needed for the code exchange) and calls schwab-py ``client_from_received_url`` with our
+    token writer. Returns the token path. Used by the web OAuth reconnect ``/callback``.
+    """
+    if not SCHWAB_APP_KEY or not SCHWAB_APP_SECRET:
+        raise ValueError("Missing SCHWAB_APP_KEY or SCHWAB_APP_SECRET in environment")
+    auth = _load_schwab_auth_module()
+    auth_context = auth.get_auth_context(SCHWAB_APP_KEY, callback_url, state=state)
+    auth.client_from_received_url(
+        SCHWAB_APP_KEY,
+        SCHWAB_APP_SECRET,
+        auth_context,
+        received_url,
+        write_schwab_token,
+        asyncio=False,
+        enforce_enums=False,
+    )
+    return _token_path()

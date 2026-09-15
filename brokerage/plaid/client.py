@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import functools
+import sys
 import time
 from typing import Any, Dict, Optional
 
@@ -28,6 +29,7 @@ from brokerage._logging import (
 from brokerage.config import PLAID_CLIENT_ID, PLAID_ENV, PLAID_SECRET
 from brokerage._shared.api_budget_costs import COST_PER_CALL
 
+_DARWIN_REQUEST_TIMEOUT_SECONDS = 30
 _PLAID_IMPORT_ERROR: Exception | None = None
 _PLAID_AVAILABLE = False
 
@@ -107,6 +109,12 @@ def _plaid_cost_per_call(operation: str) -> Any:
     return COST_PER_CALL.get(("plaid", operation), 0)
 
 
+def _plaid_request_timeout_kwargs() -> dict[str, int]:
+    if sys.platform == "darwin":
+        return {"_request_timeout": _DARWIN_REQUEST_TIMEOUT_SECONDS}
+    return {}
+
+
 def create_hosted_link_token(
     user_id: str,
     redirect_uri: str = "https://yourapp.com/plaid/complete",
@@ -140,6 +148,7 @@ def create_hosted_link_token(
         cost_per_call=_plaid_cost_per_call("link_token_create"),
         fn=client.link_token_create,
         args=(req,),
+        kwargs=_plaid_request_timeout_kwargs(),
     )
     return {
         "link_token": resp.link_token,
@@ -181,6 +190,7 @@ def create_update_link_token(
         cost_per_call=_plaid_cost_per_call("link_token_create"),
         fn=client.link_token_create,
         args=(req,),
+        kwargs=_plaid_request_timeout_kwargs(),
     )
     return {
         "link_token": resp.link_token,
@@ -206,6 +216,7 @@ def _wait_for_public_token(
             cost_per_call=_plaid_cost_per_call("link_token_get"),
             fn=client.link_token_get,
             args=(LinkTokenGetRequest(link_token=link_token),),
+            kwargs=_plaid_request_timeout_kwargs(),
         )
         sessions = getattr(resp, "link_sessions", None)
         if sessions:
@@ -253,6 +264,7 @@ def _get_institution_info(
         cost_per_call=_plaid_cost_per_call("item_get"),
         fn=client.item_get,
         args=(ItemGetRequest(access_token=access_token),),
+        kwargs=_plaid_request_timeout_kwargs(),
     )
     inst_id = item_rsp.item.institution_id
 
@@ -268,6 +280,7 @@ def _get_institution_info(
                 country_codes=[CountryCode(country)],
             ),
         ),
+        kwargs=_plaid_request_timeout_kwargs(),
     )
     inst_name = inst_rsp.institution.name
     return inst_name, inst_id
@@ -318,6 +331,7 @@ def _fetch_plaid_holdings(
             cost_per_call=_plaid_cost_per_call("investments_holdings_get"),
             fn=client.investments_holdings_get,
             args=(request,),
+            kwargs=_plaid_request_timeout_kwargs(),
         )
         response_data = response.to_dict()
         response_time = time.time() - start_time
@@ -412,6 +426,7 @@ def _fetch_plaid_balances(
             cost_per_call=_plaid_cost_per_call("accounts_balance_get"),
             fn=client.accounts_balance_get,
             args=(request,),
+            kwargs=_plaid_request_timeout_kwargs(),
         )
         response_data = response.to_dict()
         response_time = time.time() - start_time
@@ -490,6 +505,7 @@ def exchange_public_token(
         cost_per_call=_plaid_cost_per_call("item_public_token_exchange"),
         fn=client.item_public_token_exchange,
         args=(ItemPublicTokenExchangeRequest(public_token=public_token),),
+        kwargs=_plaid_request_timeout_kwargs(),
     )
     return response.to_dict()
 
@@ -531,6 +547,7 @@ def get_investments_transactions(
         cost_per_call=_plaid_cost_per_call("investments_transactions_get"),
         fn=client.investments_transactions_get,
         args=(request,),
+        kwargs=_plaid_request_timeout_kwargs(),
     )
     return response.to_dict()
 
@@ -551,6 +568,7 @@ def get_item(
         cost_per_call=_plaid_cost_per_call("item_get"),
         fn=client.item_get,
         args=(ItemGetRequest(access_token=access_token),),
+        kwargs=_plaid_request_timeout_kwargs(),
     )
     return response.to_dict()
 

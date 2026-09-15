@@ -1,8 +1,13 @@
-# risk-module-brokerage
+# brokerage-connect
+
+**Status:** CURRENT / ACTIVE REFERENCE
+**Last reviewed:** 2026-07-29
+**Current source of truth:** brokerage-connect/brokerage/ code + brokerage-connect/pyproject.toml
+
 
 `brokerage/` is the extracted brokerage package used by the backend trade-execution and provider-integration flows in this repo.
 
-Package metadata lives in `brokerage/pyproject.toml` under the name `risk-module-brokerage`.
+Package metadata lives in `pyproject.toml` (one level up, at the package root) under the name `brokerage-connect`.
 
 ## What It Contains
 
@@ -12,29 +17,29 @@ Package metadata lives in `brokerage/pyproject.toml` under the name `risk-module
 | `trade_objects.py` | Shared order, preview, fill, cancel, and account dataclasses |
 | `snaptrade/` | SnapTrade clients, adapters, connection helpers, recovery helpers, trading helpers |
 | `schwab/` | Schwab client and broker adapter |
-| `ibkr/` | IBKR broker adapter for trade-execution flows |
+| `ibkr/` | IBKR provider modules (trade adapter, client, market data, account, connection, flex) used by trade-execution and the separate MCP shell |
 | `plaid/` | Plaid connection and secret helpers |
 | `futures/` | Futures contract specs, notionals, pricing helpers, and source adapters |
 | `config.py` | Brokerage configuration and env loading |
 
-`core/trade_objects.py` remains as a compatibility shim that re-exports `brokerage.trade_objects`.
+Monorepo import path uses package `brokerage` (sourced from this tree; root `brokerage/__init__.py` only adjusts `__path__`). There is no `core/trade_objects.py` shim.
 
 ## Supported Integrations
 
 | Integration | Package extra | What it covers |
 |---|---|---|
-| SnapTrade | `risk-module-brokerage[snaptrade]` | Connection flows, account discovery, trade preview/execute, order status |
-| Schwab | `risk-module-brokerage[schwab]` | Direct Schwab client and trade adapter |
-| IBKR | `risk-module-brokerage[ibkr]` | Trade adapter that works alongside the separate `ibkr/` package |
-| Plaid | `risk-module-brokerage[plaid]` | Connection-oriented helpers and secrets support |
+| SnapTrade | `brokerage-connect[snaptrade]` | Connection flows, account discovery, trade preview/execute, order status |
+| Schwab | `brokerage-connect[schwab]` | Direct Schwab client and trade adapter |
+| IBKR | `brokerage-connect[ibkr]` | Trade adapter + IBKR client modules; monorepo `ibkr/` package is the MCP server shell importing `brokerage.ibkr` |
+| Plaid | `brokerage-connect[plaid]` | Connection-oriented helpers and secrets support |
 
 ## Install
 
 ```bash
-pip install risk-module-brokerage
-pip install "risk-module-brokerage[snaptrade]"
-pip install "risk-module-brokerage[schwab,plaid]"
-pip install "risk-module-brokerage[schwab,ibkr]"
+pip install brokerage-connect
+pip install "brokerage-connect[snaptrade]"
+pip install "brokerage-connect[schwab,plaid]"
+pip install "brokerage-connect[schwab,ibkr]"
 ```
 
 ## Public Exports
@@ -49,7 +54,7 @@ The package exports:
 
 - `services/trade_execution_service.py` is the main consumer of the `BrokerAdapter` interface.
 - The REST and MCP trading surfaces call into the service layer, which then uses these adapters.
-- The separate `ibkr/` package covers market-data and account tooling; `brokerage/ibkr/adapter.py` is specifically the trade-execution side.
+- Implementation lives under `brokerage/ibkr/` (including `adapter.py` for trade execution plus client/market_data/account); root `ibkr/` is the published MCP shell (`server.py`) that imports `brokerage.ibkr`.
 
 ## Notes
 

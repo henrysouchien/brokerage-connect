@@ -81,3 +81,12 @@ def _to_float(value: Any) -> float | None:
         return result
     except (TypeError, ValueError):
         return None
+
+
+def safe_float(value: Any, default: float | None = None) -> float | None:
+    """Safely convert a value to a finite float."""
+
+    parsed = _to_float(value)
+    if parsed is None:
+        return default
+    return parsed

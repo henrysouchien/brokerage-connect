@@ -4,14 +4,15 @@ Called by:
 - ``services.trade_execution_service.TradeExecutionService`` for IBKR accounts.
 
 Calls into:
-- ``ibkr.connection.IBKRConnectionManager`` and IB Gateway order APIs.
+- ``brokerage.ibkr.connection.IBKRConnectionManager`` and IB Gateway order APIs.
 
 Related:
-- ``ibkr.client.IBKRClient`` — read-only data facade (positions, market data, metadata).
+- ``brokerage.ibkr.client.IBKRClient`` — read-only data facade (positions, market data, metadata).
 """
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import os
 import sys
@@ -35,24 +36,27 @@ from brokerage.trade_objects import (
     OrderPreview,
     OrderResult,
     OrderStatus,
+    estimate_order_cash_total,
     _iso,
 )
-from ibkr.config import (
+from brokerage.options_types import OptionLeg, OptionStrategy
+
+from ._budget import guard_ib_call
+from .config import (
     IBKR_OPTION_SNAPSHOT_TIMEOUT,
     IBKR_SNAPSHOT_POLL_INTERVAL,
     IBKR_TIMEOUT,
     IBKR_TRADE_CLIENT_ID,
 )
-from ibkr.connection import IBKRConnectionManager
-from ibkr._budget import guard_ib_call
-from ibkr.locks import ibkr_shared_lock
-from brokerage.options_types import OptionLeg, OptionStrategy
+from .connection import IBKRConnectionManager
+from .locks import ibkr_shared_lock
+from .relay_adapter import BrokerAdapterError
 
 if TYPE_CHECKING:
     import pandas as pd
 
-    from ibkr.client import IBKRClient
-    from ibkr.contract_spec import IBKRContractSpec
+    from .client import IBKRClient
+    from .contract_spec import IBKRContractSpec
 
 
 IBKR_STATUS_MAP = {
@@ -108,6 +112,27 @@ _IB_ACTION_MAP = {
 }
 
 
+def _rehydrate(value, cls):
+    if isinstance(value, cls):
+        return value
+    if cls is OptionStrategy and isinstance(value, dict):
+        legs_raw = value.get("legs") or []
+        legs = [
+            leg if isinstance(leg, OptionLeg) else OptionLeg(**leg)
+            for leg in legs_raw
+        ]
+        rest = {k: v for k, v in value.items() if k != "legs"}
+        if "currency" not in rest:
+            raise BrokerAdapterError("option_strategy_currency_required")
+        currency = rest.pop("currency")
+        return OptionStrategy(legs=legs, currency=currency, **rest)
+    if dataclasses.is_dataclass(cls) and isinstance(value, dict):
+        return cls(**value)
+    raise BrokerAdapterError(
+        f"rehydrate_unexpected_type:{cls.__name__}:{type(value).__name__}"
+    )
+
+
 def _get_trading_conn_manager() -> IBKRConnectionManager:
     global _trading_conn_manager, _trading_conn_manager_factory
     with _trading_conn_lock:
@@ -124,6 +149,32 @@ def ibkr_to_common_status(status: str, filled: float = 0, remaining: float = 0) 
     if status == "ValidationError":
         return "REJECTED"
     return IBKR_STATUS_MAP.get(status, "PENDING")
+
+
+def _require_ibkr_order_id(trade: Any, *, order_category: str) -> str:
+    """Integrity guard: a placement success MUST yield a referenceable broker order id.
+
+    orderId == 0 is ib_async's UNSET sentinel (Order().orderId defaults to 0; IB.placeOrder()
+    replaces it via client.getReqId()). A returned trade still carrying 0/None/blank is NOT
+    referenceable, so reject it and raise.
+
+    The message MUST avoid substrings matched by
+    trade_execution_service._is_uncertain_submission_error
+    (disconnect / disconnected / connection reset / broken pipe / socket / network error /
+     timed out / timeout) AND the word "expire", so the single-leg place_order except handler
+    routes this to FAILED+cancelled, NOT the IBKR recovery-probe branch.
+    """
+    order = getattr(trade, "order", None)
+    order_id = getattr(order, "orderId", None) if order is not None else None
+    order_id_str = "" if order_id is None else str(order_id).strip()
+    if order_id_str in ("", "0"):
+        raise RuntimeError(
+            f"IBKR {order_category} placement returned no referenceable order id "
+            f"(trade.order={'present' if order is not None else 'missing'}, "
+            f"orderId={order_id!r}). The order MAY ALREADY BE LIVE at IBKR but we cannot "
+            "reference, cancel, or reconcile it; verify in TWS / IB Gateway before retrying."
+        )
+    return order_id_str
 
 
 class IBKRBrokerAdapter(BrokerAdapter):
@@ -166,9 +217,12 @@ class IBKRBrokerAdapter(BrokerAdapter):
     def provider_name(self) -> str:
         return "ibkr"
 
+    def probe(self) -> dict[str, Any]:
+        return self._conn_manager.probe_connection()
+
     def _get_client(self) -> IBKRClient:
         if self._client is None:
-            from ibkr.client import IBKRClient
+            from .client import IBKRClient
 
             self._client = IBKRClient()
         return self._client
@@ -181,7 +235,23 @@ class IBKRBrokerAdapter(BrokerAdapter):
         **kwargs,
     ) -> list[dict[str, Any]]:
         """Fetch live market snapshots through the read-only IBKR client."""
+        from .contract_spec import IBKRContractSpec
+
+        contracts = [_rehydrate(contract, IBKRContractSpec) for contract in contracts]
         return self._get_client().fetch_snapshot(
+            contracts=contracts,
+            budget_user_id=budget_user_id,
+            **kwargs,
+        )
+
+    def fetch_snapshot(
+        self,
+        contracts: list[IBKRContractSpec | Any],
+        *,
+        budget_user_id: int | None = None,
+        **kwargs,
+    ) -> list[dict[str, Any]]:
+        return self.fetch_market_snapshot(
             contracts=contracts,
             budget_user_id=budget_user_id,
             **kwargs,
@@ -195,6 +265,17 @@ class IBKRBrokerAdapter(BrokerAdapter):
     ) -> pd.DataFrame:
         """Fetch live IBKR positions through the read-only IBKR client."""
         return self._get_client().get_positions(
+            account_id=account_id,
+            budget_user_id=budget_user_id,
+        )
+
+    def get_portfolio_with_cash(
+        self,
+        account_id: str,
+        *,
+        budget_user_id: int | None = None,
+    ) -> tuple[pd.DataFrame, dict[str, float]]:
+        return self._get_client().get_portfolio_with_cash(
             account_id=account_id,
             budget_user_id=budget_user_id,
         )
@@ -294,9 +375,14 @@ class IBKRBrokerAdapter(BrokerAdapter):
                 )
             return result
 
-    def search_symbol(self, account_id: str, ticker: str) -> Dict[str, Any]:
+    def search_symbol(
+        self,
+        account_id: str,
+        ticker: str,
+        currency: str,
+    ) -> Dict[str, Any]:
         with ibkr_shared_lock, self._connected() as ib:
-            return self._search_symbol_with_ib(ib, ticker)
+            return self._search_symbol_with_ib(ib, ticker, currency)
 
     def _build_roll_contract(
         self,
@@ -308,7 +394,7 @@ class IBKRBrokerAdapter(BrokerAdapter):
     ):
         """Build a qualified IBKR BAG combo contract for a futures calendar roll."""
         from ib_async import ComboLeg, Contract
-        from ibkr.contracts import resolve_futures_contract
+        from .contracts import resolve_futures_contract
 
         sym = str(symbol or "").strip().upper()
         fm = str(front_month or "").strip()
@@ -352,7 +438,6 @@ class IBKRBrokerAdapter(BrokerAdapter):
             or getattr(back_qualified, "currency", None)
             or getattr(front_contract, "currency", None)
             or getattr(back_contract, "currency", None)
-            or "USD"
         )
 
         if not front_con_id or not back_con_id:
@@ -415,7 +500,7 @@ class IBKRBrokerAdapter(BrokerAdapter):
     ):
         """Build a qualified IBKR BAG contract for multi-leg option execution."""
         from ib_async import ComboLeg, Contract, Stock
-        from ibkr.contracts import resolve_option_contract
+        from .contracts import resolve_option_contract
 
         if quantity <= 0:
             raise ValueError("quantity must be greater than 0")
@@ -433,7 +518,9 @@ class IBKRBrokerAdapter(BrokerAdapter):
                 raise ValueError(f"leg {idx} size must be an integer for combo ratio")
 
             if leg.option_type == "stock":
-                contracts_to_qualify.append(Stock(underlying_symbol, "SMART", "USD"))
+                contracts_to_qualify.append(
+                    Stock(underlying_symbol, "SMART", strategy.currency)
+                )
                 continue
 
             right = "C" if leg.option_type == "call" else "P"
@@ -444,6 +531,7 @@ class IBKRBrokerAdapter(BrokerAdapter):
                 "strike": leg.strike,
                 "right": right,
                 "multiplier": leg.multiplier,
+                "currency": strategy.currency,
             }
             contracts_to_qualify.append(
                 resolve_option_contract(underlying_symbol, contract_identity=contract_identity)
@@ -476,8 +564,14 @@ class IBKRBrokerAdapter(BrokerAdapter):
             raise ValueError("Unable to determine combo exchange from qualified contracts")
         if not derived_currency:
             raise ValueError("Unable to determine combo currency from qualified contracts")
-        if derived_currency != "USD":
-            raise ValueError("only US equity options supported in phase 1")
+        qualified_currencies = {
+            str(getattr(contract, "currency", "") or "").strip().upper()
+            for contract in qualified_contracts
+        }
+        if qualified_currencies != {strategy.currency}:
+            raise ValueError(
+                "qualified combo currencies do not match strategy currency"
+            )
 
         combo_legs = []
         for idx, (leg, qualified) in enumerate(zip(strategy.legs, qualified_contracts), start=1):
@@ -528,6 +622,7 @@ class IBKRBrokerAdapter(BrokerAdapter):
         time_in_force: str = "Day",
     ) -> OrderPreview:
         """Preview a multi-leg option BAG order with live per-leg pricing."""
+        strategy = _rehydrate(strategy, OptionStrategy)
         qty = float(quantity)
         if qty <= 0:
             raise ValueError("quantity must be greater than 0")
@@ -668,6 +763,7 @@ class IBKRBrokerAdapter(BrokerAdapter):
             underlying_symbol = str(strategy.underlying_symbol or "").strip().upper()
             order_params = {
                 "legs": [self._serialize_leg_for_storage(leg) for leg in strategy.legs],
+                "currency": strategy.currency,
                 "underlying_symbol": underlying_symbol,
                 "underlying_price": strategy.underlying_price,
                 "quantity": qty,
@@ -732,6 +828,7 @@ class IBKRBrokerAdapter(BrokerAdapter):
 
             strategy = OptionStrategy(
                 legs=legs,
+                currency=order_params.get("currency"),
                 underlying_symbol=underlying_symbol,
                 underlying_price=order_params.get("underlying_price"),
                 description=order_params.get("description"),
@@ -778,8 +875,10 @@ class IBKRBrokerAdapter(BrokerAdapter):
             if avg_fill is not None and filled > 0:
                 total_cost = (filled * avg_fill) + (commission or 0.0)
 
+            brokerage_order_id = _require_ibkr_order_id(trade, order_category="multi-leg option")
+
             return OrderResult(
-                brokerage_order_id=str(trade.order.orderId) if trade.order else None,
+                brokerage_order_id=brokerage_order_id,
                 status=common_status,
                 filled_quantity=filled,
                 total_quantity=quantity,
@@ -797,6 +896,7 @@ class IBKRBrokerAdapter(BrokerAdapter):
         self,
         account_id: str,
         ticker: str,
+        currency: str,
         side: str,
         quantity: float,
         order_type: str,
@@ -828,16 +928,16 @@ class IBKRBrokerAdapter(BrokerAdapter):
                             "contract": contract,
                         }
                     else:
-                        symbol_info = self._search_symbol_with_ib(ib, ticker)
+                        symbol_info = self._search_symbol_with_ib(ib, ticker, currency)
                         contract = symbol_info["contract"]
                 except BudgetExceededError:
                     raise
                 except Exception as exc:
                     _raise_if_budget_exceeded(exc)
-                    symbol_info = self._search_symbol_with_ib(ib, ticker)
+                    symbol_info = self._search_symbol_with_ib(ib, ticker, currency)
                     contract = symbol_info["contract"]
             else:
-                symbol_info = self._search_symbol_with_ib(ib, ticker)
+                symbol_info = self._search_symbol_with_ib(ib, ticker, currency)
                 contract = symbol_info["contract"]
 
             order = self._build_order(
@@ -894,7 +994,12 @@ class IBKRBrokerAdapter(BrokerAdapter):
 
             estimated_total = None
             if estimated_price is not None and estimated_commission is not None:
-                estimated_total = (estimated_price * float(quantity)) + estimated_commission
+                estimated_total = estimate_order_cash_total(
+                    side,
+                    quantity,
+                    estimated_price,
+                    estimated_commission,
+                )
 
             return OrderPreview(
                 estimated_price=estimated_price,
@@ -1099,8 +1204,10 @@ class IBKRBrokerAdapter(BrokerAdapter):
             if avg_fill is not None and filled > 0:
                 total_cost = (filled * avg_fill) + (commission or 0.0)
 
+            brokerage_order_id = _require_ibkr_order_id(trade, order_category="roll")
+
             return OrderResult(
-                brokerage_order_id=str(trade.order.orderId) if trade.order else None,
+                brokerage_order_id=brokerage_order_id,
                 status=common_status,
                 filled_quantity=filled,
                 total_quantity=quantity,
@@ -1132,6 +1239,9 @@ class IBKRBrokerAdapter(BrokerAdapter):
         with ibkr_shared_lock, self._connected() as ib:
 
             ticker = str(order_params["ticker"])
+            currency = str(order_params["currency"])
+            if len(currency) != 3 or not currency.isalpha() or currency != currency.upper():
+                raise ValueError("order currency must be an explicit uppercase ISO code")
             stored_con_id = order_params.get("con_id")
 
             if stored_con_id:
@@ -1145,14 +1255,14 @@ class IBKRBrokerAdapter(BrokerAdapter):
                     portfolio_logger.warning(
                         f"conId {stored_con_id} qualification failed, falling back to ticker"
                     )
-                    contract = Stock(ticker, "SMART", "USD")
+                    contract = Stock(ticker, "SMART", currency)
                     qualified = guard_ib_call(
                         operation="qualifyContracts",
                         fn=ib.qualifyContracts,
                         args=(contract,),
                     )
             else:
-                contract = Stock(ticker, "SMART", "USD")
+                contract = Stock(ticker, "SMART", currency)
                 qualified = guard_ib_call(
                     operation="qualifyContracts",
                     fn=ib.qualifyContracts,
@@ -1210,8 +1320,10 @@ class IBKRBrokerAdapter(BrokerAdapter):
             if avg_fill is not None and filled > 0:
                 total_cost = (filled * avg_fill) + (commission or 0.0)
 
+            brokerage_order_id = _require_ibkr_order_id(trade, order_category="order")
+
             return OrderResult(
-                brokerage_order_id=str(trade.order.orderId),
+                brokerage_order_id=brokerage_order_id,
                 status=common_status,
                 filled_quantity=filled,
                 execution_price=avg_fill,
@@ -1318,6 +1430,23 @@ class IBKRBrokerAdapter(BrokerAdapter):
         with ibkr_shared_lock, self._connected() as ib:
             return self._get_account_balance_internal(ib, account_id)
 
+    def get_option_chain(
+        self,
+        symbol: str,
+        currency: str,
+        sec_type: str = "STK",
+        exchange: str = "SMART",
+        *,
+        budget_user_id: int | None = None,
+    ) -> dict[str, Any]:
+        return self._get_client().get_option_chain(
+            symbol=symbol,
+            currency=currency,
+            sec_type=sec_type,
+            exchange=exchange,
+            budget_user_id=budget_user_id,
+        )
+
     def refresh_after_trade(self, account_id: str) -> None:
         try:
             self._on_refresh(account_id)
@@ -1403,11 +1532,22 @@ class IBKRBrokerAdapter(BrokerAdapter):
         order.account = account_id
         return order
 
-    def _search_symbol_with_ib(self, ib, ticker: str) -> Dict[str, Any]:
+    def _search_symbol_with_ib(
+        self,
+        ib,
+        ticker: str,
+        currency: str,
+    ) -> Dict[str, Any]:
         from ib_async import Stock
 
         ticker_upper = (ticker or "").upper().strip()
-        contract = Stock(ticker_upper, "SMART", "USD")
+        normalized_currency = str(currency or "").strip().upper()
+        if (
+            len(normalized_currency) != 3
+            or not normalized_currency.isalpha()
+        ):
+            raise ValueError("currency must be an explicit ISO code")
+        contract = Stock(ticker_upper, "SMART", normalized_currency)
         qualified = guard_ib_call(
             operation="qualifyContracts",
             fn=ib.qualifyContracts,
@@ -1627,7 +1767,7 @@ def _to_float(value: Any) -> Optional[float]:
         if value is None:
             return None
         result = float(value)
-        if math.isinf(result):
+        if math.isnan(result) or math.isinf(result):
             return None
         return result
     except (TypeError, ValueError):

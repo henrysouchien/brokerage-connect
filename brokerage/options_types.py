@@ -6,8 +6,9 @@ fields). External standalone users construct brokerage.options_types instances.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
+import re
 from typing import Any, Literal
 
 _POSITION_VALUES = {"long", "short"}
@@ -116,6 +117,7 @@ class OptionLeg:
 @dataclass
 class OptionStrategy:
     legs: list[OptionLeg]
+    currency: str = field(kw_only=True)
     underlying_price: float | None = None
     underlying_symbol: str | None = None
     description: str | None = None
@@ -123,6 +125,9 @@ class OptionStrategy:
     def __post_init__(self) -> None:
         if not self.legs:
             raise ValueError("strategy must include at least one leg")
+        self.currency = str(self.currency or "").strip().upper()
+        if re.fullmatch(r"[A-Z]{3}", self.currency) is None:
+            raise ValueError("strategy currency requires an explicit ISO code")
 
         if self.underlying_price in (None, ""):
             self.underlying_price = None

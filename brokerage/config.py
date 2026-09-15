@@ -1,18 +1,8 @@
-"""Brokerage package-local configuration loaded from environment variables."""
+"""Brokerage package-local configuration supplied by the launcher's process environment."""
 
 from __future__ import annotations
 
 import os
-
-try:
-    from pathlib import Path
-    from dotenv import load_dotenv
-
-    _pkg_dir = Path(__file__).resolve().parent
-    load_dotenv(_pkg_dir.parent.parent / ".env", override=False)
-except Exception:
-    # Keep imports resilient when python-dotenv is unavailable.
-    pass
 
 
 def _int_env(name: str, default: int) -> int:

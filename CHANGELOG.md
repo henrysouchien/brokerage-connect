@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.3 (2026-09-15)
+
+- Configuration is process-environment only; the package no longer reads a checkout-relative `.env` (the launcher owns dotenv loading).
+
 ## 0.6.2 (2026-09-15)
 
 - Published from the source-owned tree: in-package IBKR adapter, endpoints and relay state machine ship in the wheel; the [ibkr] extra no longer depends on interactive-brokers-mcp (supersedes the 0.6.0/0.6.1 public wheels built from the stale dist).

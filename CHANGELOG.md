@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.6 (2026-09-16)
+
+- The IBKR extra admits PyArrow 23–25 (`>=23.0.1,<26`) with unchanged parquet cache behavior.
+
 ## 0.6.4 (2026-09-15)
 
 - Removed all Risk-checkout imports, including hidden logger, budget, settings, ticker, reference-data, and cache-root discovery. Applications explicitly supply their policies; the source and published wheel now have the same dependency boundary.

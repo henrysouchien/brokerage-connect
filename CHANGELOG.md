@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.7 (2026-09-16)
+
+- Excludes PyArrow 25.0.0 due to Apache Arrow #50471's worker-thread allocator crash; 25.0.1 remains supported.
+
 ## 0.6.6 (2026-09-16)
 
 - The IBKR extra admits PyArrow 23–25 (`>=23.0.1,<26`) with unchanged parquet cache behavior.

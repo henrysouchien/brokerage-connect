@@ -15,6 +15,7 @@ import threading
 import time
 from typing import Any, List, Optional
 
+from brokerage.config import IBKR_READONLY
 from brokerage._shared.budget_exceptions import BudgetExceededError
 
 from ._logging import log_event, logger, TimingContext
@@ -26,7 +27,6 @@ from .config import (
     IBKR_GATEWAY_HOST,
     IBKR_GATEWAY_PORT,
     IBKR_MAX_RECONNECT_ATTEMPTS,
-    IBKR_READONLY,
     IBKR_RECONNECT_DELAY,
     IBKR_REQUEST_TIMEOUT,
     IBKR_TIMEOUT,

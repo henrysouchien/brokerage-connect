@@ -10,7 +10,7 @@ import os
 import sys
 import time
 import types
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -38,7 +38,21 @@ _RELOGIN_REQUIRED_MESSAGE = (
     "Schwab refresh token appears expired. Re-authenticate with: "
     "`python3 -m scripts.run_schwab login`"
 )
-_REFRESH_TOKEN_MAX_AGE = timedelta(days=7)
+SCHWAB_REFRESH_TOKEN_MAX_AGE_DAYS = 7.0
+SCHWAB_REFRESH_TOKEN_WARN_DAYS = 2.0
+SCHWAB_REFRESH_TOKEN_URGENT_DAYS = 1.0
+_REFRESH_TOKEN_MAX_AGE = timedelta(days=SCHWAB_REFRESH_TOKEN_MAX_AGE_DAYS)
+SCHWAB_CONNECTION_STATUSES: tuple[str, ...] = (
+    "not_configured",
+    "token_missing",
+    "token_unreadable",
+    "token_present",
+    "token_expired",
+    "degraded",
+    "connected",
+)
+SCHWAB_REAUTH_STATUSES: frozenset[str] = frozenset({"token_missing", "token_expired"})
+SCHWAB_UNCOUNTED_STATUSES: frozenset[str] = frozenset({"not_configured", "token_missing"})
 
 
 class _NoopLogRedactor:
@@ -94,9 +108,83 @@ def _load_schwab_auth_module() -> Any:
     return module
 
 
+_configured_token_path: str | None = None
+
+
+def configure_schwab_token_path(path: str | os.PathLike[str]) -> None:
+    """Bind the Schwab token file path for this process, overriding ``SCHWAB_TOKEN_PATH``.
+
+    Call before any token read or write. Reconfiguring to a different path
+    drops the in-memory client/account-hash caches built from the old file.
+    """
+    global _configured_token_path
+    configured = os.fspath(path)
+    if configured != _configured_token_path:
+        _configured_token_path = configured
+        invalidate_schwab_caches()
+
+
 def _token_path() -> str:
+    if _configured_token_path is not None:
+        return os.path.expanduser(_configured_token_path)
     return os.path.expanduser(SCHWAB_TOKEN_PATH)
 
+
+def _probe_token_file(token_path: str) -> tuple[bool, bool, bytes | None, str | None]:
+    """Open ``token_path`` once in binary mode; never infer readability from ``stat`` alone.
+
+    Returns ``(exists, readable, raw_bytes, read_error)``.
+    """
+    if not os.path.exists(token_path):
+        return False, False, None, None
+    try:
+        with open(token_path, "rb") as handle:
+            return True, True, handle.read(), None
+    except FileNotFoundError:
+        return False, False, None, None
+    except OSError as exc:
+        return (
+            True,
+            False,
+            None,
+            f"Token file at {token_path} is not readable by this process: {exc}",
+        )
+
+
+def probe_schwab_token_file() -> dict[str, Any]:
+    """Probe whether the Schwab token file exists and is readable by this process."""
+    token_path = _token_path()
+    exists, readable, _, read_error = _probe_token_file(token_path)
+    result: dict[str, Any] = {
+        "token_file_exists": exists,
+        "token_file_readable": readable,
+    }
+    if read_error is not None:
+        result["warnings"] = [read_error]
+    return result
+
+
+def derive_schwab_connection_status(
+    state: Mapping[str, Any],
+    *,
+    enabled: bool,
+    probed_health: bool = False,
+) -> str:
+    """Derive the canonical Schwab connection status from a token probe or health dict."""
+    if not enabled:
+        return "not_configured"
+    if not bool(state.get("token_file_exists")):
+        return "token_missing"
+    if state.get("token_file_readable") is False:
+        return "token_unreadable"
+    if not probed_health:
+        return "token_present"
+    if bool(state.get("near_refresh_expiry")):
+        return "token_expired"
+    warnings = state.get("warnings")
+    if isinstance(warnings, Sequence) and not isinstance(warnings, (str, bytes)) and len(warnings) > 0:
+        return "degraded"
+    return "connected"
 
 def _load_json_response(response: Any) -> Any:
     if response is None:
@@ -170,6 +258,7 @@ def is_invalid_grant_error(exc: Exception) -> bool:
         or "invalid grant" in message
         or "refresh_token_authentication_error" in message
         or "unsupported_token_type" in message
+        or ("schwab" in message and "refresh token" in message and "expired" in message)
     )
 
 
@@ -199,7 +288,8 @@ def _cache_invalid_grant(fingerprint: datetime | None = None) -> None:
 
 def _token_written_at() -> datetime | None:
     token_path = _token_path()
-    if not os.path.exists(token_path):
+    exists, readable, raw_bytes, _ = _probe_token_file(token_path)
+    if not exists or not readable:
         return None
 
     try:
@@ -208,8 +298,7 @@ def _token_written_at() -> datetime | None:
         written_at = None
 
     try:
-        with open(token_path, "r", encoding="utf-8") as handle:
-            token_blob = json.load(handle)
+        token_blob = json.loads((raw_bytes or b"").decode("utf-8"))
     except Exception:
         token_blob = {}
 
@@ -234,6 +323,12 @@ def _refresh_token_expired_by_file_age(now: datetime | None = None) -> bool:
     return (now - written_at) >= _REFRESH_TOKEN_MAX_AGE
 
 
+def _read_schwab_token() -> Any:
+    token_path = _token_path()
+    with open(token_path, "rb") as handle:
+        return json.load(handle)
+
+
 def _client_from_token_file() -> Any:
     if not SCHWAB_APP_KEY or not SCHWAB_APP_SECRET:
         raise ValueError("Missing SCHWAB_APP_KEY or SCHWAB_APP_SECRET in environment")
@@ -245,18 +340,14 @@ def _client_from_token_file() -> Any:
         )
 
     auth = _load_schwab_auth_module()
-
-    # Keep compatibility with minor signature differences across schwab-py versions.
-    try:
-        return auth.client_from_token_file(
-            token_path=token_path,
-            api_key=SCHWAB_APP_KEY,
-            app_secret=SCHWAB_APP_SECRET,
-            enforce_enums=False,
-        )
-    except TypeError:
-        return auth.client_from_token_file(token_path, SCHWAB_APP_KEY, SCHWAB_APP_SECRET)
-
+    return auth.client_from_access_functions(
+        SCHWAB_APP_KEY,
+        SCHWAB_APP_SECRET,
+        _read_schwab_token,
+        write_schwab_token,
+        asyncio=False,
+        enforce_enums=False,
+    )
 
 @functools.lru_cache(maxsize=2)
 def _get_or_create_client(_token_fingerprint: Any = None) -> Any:
@@ -449,36 +540,24 @@ def schwab_login(manual: bool = False) -> Any:
     _get_or_create_client.cache_clear()
 
     if manual:
-        try:
-            client = auth.client_from_manual_flow(
-                api_key=SCHWAB_APP_KEY,
-                app_secret=SCHWAB_APP_SECRET,
-                callback_url=SCHWAB_CALLBACK_URL,
-                token_path=token_path,
-            )
-        except TypeError:
-            client = auth.client_from_manual_flow(
-                SCHWAB_APP_KEY,
-                SCHWAB_APP_SECRET,
-                SCHWAB_CALLBACK_URL,
-                token_path,
-            )
+        client = auth.client_from_manual_flow(
+            api_key=SCHWAB_APP_KEY,
+            app_secret=SCHWAB_APP_SECRET,
+            callback_url=SCHWAB_CALLBACK_URL,
+            token_path=token_path,
+            token_write_func=write_schwab_token,
+            enforce_enums=False,
+        )
     else:
-        try:
-            client = auth.client_from_login_flow(
-                api_key=SCHWAB_APP_KEY,
-                app_secret=SCHWAB_APP_SECRET,
-                callback_url=SCHWAB_CALLBACK_URL,
-                token_path=token_path,
-                interactive=False,
-            )
-        except TypeError:
-            client = auth.client_from_login_flow(
-                SCHWAB_APP_KEY,
-                SCHWAB_APP_SECRET,
-                SCHWAB_CALLBACK_URL,
-                token_path,
-            )
+        client = auth.client_from_login_flow(
+            api_key=SCHWAB_APP_KEY,
+            app_secret=SCHWAB_APP_SECRET,
+            callback_url=SCHWAB_CALLBACK_URL,
+            token_path=token_path,
+            interactive=False,
+            token_write_func=write_schwab_token,
+            enforce_enums=False,
+        )
     return client
 
 
@@ -694,9 +773,12 @@ def place_order(
 def check_token_health() -> dict[str, Any]:
     """Inspect token file and client age; warn near 7-day refresh expiry."""
     token_path = _token_path()
+    exists, readable, raw_bytes, read_error = _probe_token_file(token_path)
     health: dict[str, Any] = {
         "token_path": token_path,
-        "token_file_exists": os.path.exists(token_path),
+        "token_file_exists": exists,
+        "token_file_readable": readable,
+        "status": "token_missing",
         "token_age_seconds": None,
         "refresh_token_expires_at": None,
         "refresh_token_days_remaining": None,
@@ -704,17 +786,24 @@ def check_token_health() -> dict[str, Any]:
         "warnings": [],
     }
 
-    if not os.path.exists(token_path):
+    if not exists:
         health["warnings"].append("Token file missing. Run `python3 -m scripts.run_schwab login`.")
+        health["status"] = derive_schwab_connection_status(health, enabled=True, probed_health=True)
+        return health
+
+    if not readable:
+        if read_error is not None:
+            health["warnings"].append(read_error)
+        health["status"] = derive_schwab_connection_status(health, enabled=True, probed_health=True)
         return health
 
     token_blob: dict[str, Any] = {}
     try:
-        with open(token_path, "r", encoding="utf-8") as handle:
-            token_blob = json.load(handle)
+        parsed = json.loads((raw_bytes or b"").decode("utf-8"))
+        if isinstance(parsed, dict):
+            token_blob = parsed
     except Exception as exc:
         health["warnings"].append(f"Could not parse token file JSON: {exc}")
-
     try:
         client = get_schwab_client()
         token_age = getattr(client, "token_age", None)
@@ -736,32 +825,19 @@ def check_token_health() -> dict[str, Any]:
         else:
             health["warnings"].append(f"Client health check failed: {exc}")
 
-    # Use file mtime as the most reliable indicator of when the token was
-    # last written (creation_timestamp is set once and not updated on re-login
-    # by some schwab-py versions).
-    try:
-        mtime = os.path.getmtime(token_path)
-        created_dt = datetime.fromtimestamp(mtime, tz=UTC)
-
-        # Also check creation_timestamp if it's newer (in case schwab-py does update it)
-        blob_ts = token_blob.get("creation_timestamp")
-        if blob_ts is not None:
-            blob_dt = datetime.fromtimestamp(float(blob_ts), tz=UTC)
-            if blob_dt > created_dt:
-                created_dt = blob_dt
-
-        refresh_expiry = created_dt + timedelta(days=7)
+    written_at = _token_written_at()
+    if written_at is not None:
+        refresh_expiry = written_at + _REFRESH_TOKEN_MAX_AGE
         remaining_days = (refresh_expiry - datetime.now(tz=UTC)).total_seconds() / 86400
         health["refresh_token_expires_at"] = refresh_expiry.isoformat()
         health["refresh_token_days_remaining"] = round(remaining_days, 2)
-        if remaining_days <= 1.0:
+        if remaining_days <= SCHWAB_REFRESH_TOKEN_URGENT_DAYS:
             health["near_refresh_expiry"] = True
             health["warnings"].append(
-                "Refresh token near expiry (<=1 day). Re-run `python3 -m scripts.run_schwab login` soon."
+                f"Refresh token near expiry (<={SCHWAB_REFRESH_TOKEN_URGENT_DAYS:g} day). "
+                "Re-run `python3 -m scripts.run_schwab login` soon."
             )
-    except Exception:
-        pass
-
+    health["status"] = derive_schwab_connection_status(health, enabled=True, probed_health=True)
     return health
 
 
@@ -774,14 +850,19 @@ def invalidate_schwab_caches() -> None:
     portfolio_logger.info("Cleared in-memory Schwab client/account-hash cache")
 
 
-def write_schwab_token(wrapped_token: Mapping[str, Any]) -> str:
-    """Atomically write a schwab-py metadata-wrapped token to the Schwab token path.
+def write_schwab_token(
+    wrapped_token: Mapping[str, Any],
+    *_args: Any,
+    **_kwargs: Any,
+) -> str:
+    """Atomically write a schwab-py metadata-wrapped token to the Schwab token path with mode 0600.
 
-    ``wrapped_token`` is the ``{"creation_timestamp", "token"}`` object that
-    ``schwab.auth.client_from_received_url`` hands to its ``token_write_func`` — write it AS-IS
-    (do NOT re-wrap, do NOT write the raw token) so ``client_from_token_file`` reads it back
-    unchanged. Used by the web OAuth reconnect route. Invalidates the in-process client cache
-    after writing (other workers pick up the new token via the token-file fingerprint cache key).
+    ``wrapped_token`` is the ``{"creation_timestamp", "token"}`` object that schwab-py's
+    ``TokenMetadata.wrapped_token_write_func`` hands to its ``token_write_func`` (both on initial
+    OAuth exchange and on ``OAuth2Client`` access-token refresh, which passes extra keyword args
+    such as ``refresh_token`` / ``access_token``). Writes via a ``0600`` temp file and
+    ``os.replace`` so the destination inode is created ``0600`` from the start regardless of
+    process umask.
     """
     token_path = _token_path()
     parent = os.path.dirname(token_path)
@@ -800,14 +881,9 @@ def write_schwab_token(wrapped_token: Mapping[str, Any]) -> str:
         except OSError:
             pass
         raise
-    os.replace(tmp_path, token_path)  # atomic; destination inherits the 0600 temp-file mode
-    try:
-        os.chmod(token_path, 0o600)
-    except OSError:
-        pass
+    os.replace(tmp_path, token_path)  # atomic; destination is the 0600 temp-file inode
     invalidate_schwab_caches()
     return token_path
-
 
 def build_schwab_auth_context(callback_url: str, state: str | None = None) -> Any:
     """schwab-py ``get_auth_context`` — returns ``AuthContext(callback_url, authorization_url, state)``.

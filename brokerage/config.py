@@ -21,10 +21,21 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def parse_ibkr_readonly(raw: str | None) -> bool:
+    if raw is None:
+        return False
+    value = raw.strip().lower()
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    raise ValueError(f"IBKR_READONLY must be 'true' or 'false' (got {raw!r})")
+
+
 # Cross-reference: ibkr/config.py:41-58.
 IBKR_GATEWAY_HOST: str = os.getenv("IBKR_GATEWAY_HOST", "127.0.0.1")
 IBKR_GATEWAY_PORT: int = _int_env("IBKR_GATEWAY_PORT", 7496)
-IBKR_READONLY: bool = os.getenv("IBKR_READONLY", "false").lower() == "true"
+IBKR_READONLY: bool = parse_ibkr_readonly(os.getenv("IBKR_READONLY"))
 IBKR_AUTHORIZED_ACCOUNTS: list[str] = [
     account.strip()
     for account in os.getenv("IBKR_AUTHORIZED_ACCOUNTS", "").split(",")

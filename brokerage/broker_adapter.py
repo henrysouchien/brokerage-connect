@@ -20,6 +20,17 @@ if TYPE_CHECKING:
     from brokerage.ibkr.contract_spec import IBKRContractSpec
 
 
+class SubmissionOutcomeUnknownError(RuntimeError):
+    """A placement failed after dispatch, so the broker may already hold the order.
+
+    Raised only where the adapter knows the request could have reached the broker
+    (the order may be live) and cannot reference it. A pre-dispatch refusal, a broker
+    explicit reject and any failure whose delivery state is unclassified stay plain
+    exceptions. Subclasses ``RuntimeError`` so existing ``except Exception`` and
+    ``except RuntimeError`` paths behave as before.
+    """
+
+
 class BrokerAdapter(ABC):
     """Abstract trade adapter contract used by ``TradeExecutionService``.
 

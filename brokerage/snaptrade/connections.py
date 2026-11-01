@@ -26,6 +26,10 @@ from brokerage.snaptrade.client import (
 )
 from brokerage.snaptrade.users import get_snaptrade_user_id_from_email
 
+# Neutral substring: the trading probe only checks that symbol search answers for the
+# account; it must not name an issuer.
+_TRADING_PROBE_SUBSTRING = "a"
+
 
 def _normalize_payload_list(payload: Any) -> list[dict[str, Any]]:
     if not isinstance(payload, list):
@@ -322,7 +326,7 @@ def check_snaptrade_connection_health(
                         user_id=snaptrade_user_id,
                         user_secret=current_secret,
                         account_id=probe_account_id,
-                        substring="AAPL",
+                        substring=_TRADING_PROBE_SUBSTRING,
                         **_budget_kwargs(budget_user_id),
                     )
                     trading_ok = True

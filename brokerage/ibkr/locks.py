@@ -88,3 +88,12 @@ In persistent mode: serializes access to the shared IB instance.
 In ephemeral mode: prevents concurrent connections on the same client ID,
 including from separate local Python processes.
 """
+
+
+def configure_ibkr_shared_lock_path(path: str | os.PathLike[str]) -> None:
+    """Bind ``ibkr_shared_lock`` to ``path``, overriding ``IBKR_SHARED_LOCK_FILE``.
+
+    Call before the first acquisition; a hold in progress keeps its open handle.
+    """
+    configured = os.fspath(path)
+    ibkr_shared_lock.path = Path(configured)

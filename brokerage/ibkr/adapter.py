@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from brokerage._shared.budget_exceptions import BudgetExceededError
 from brokerage._logging import portfolio_logger
-from brokerage.broker_adapter import BrokerAdapter
+from brokerage.broker_adapter import BrokerAdapter, SubmissionOutcomeUnknownError
 from brokerage.config import (
     IBKR_AUTHORIZED_ACCOUNTS,
     IBKR_GATEWAY_HOST,
@@ -168,7 +168,7 @@ def _require_ibkr_order_id(trade: Any, *, order_category: str) -> str:
     order_id = getattr(order, "orderId", None) if order is not None else None
     order_id_str = "" if order_id is None else str(order_id).strip()
     if order_id_str in ("", "0"):
-        raise RuntimeError(
+        raise SubmissionOutcomeUnknownError(
             f"IBKR {order_category} placement returned no referenceable order id "
             f"(trade.order={'present' if order is not None else 'missing'}, "
             f"orderId={order_id!r}). The order MAY ALREADY BE LIVE at IBKR but we cannot "
@@ -807,7 +807,7 @@ class IBKRBrokerAdapter(BrokerAdapter):
         order_params: Dict[str, Any],
     ) -> OrderResult:
         """Place a previously previewed multi-leg option BAG order."""
-        if os.environ.get("IBKR_READONLY", "").lower() == "true":
+        if IBKR_READONLY:
             raise ValueError("IBKR is in read-only mode. Cannot place orders.")
 
         if not isinstance(order_params, dict):
@@ -1137,7 +1137,7 @@ class IBKRBrokerAdapter(BrokerAdapter):
         order_params: Dict[str, Any],
     ) -> OrderResult:
         """Place a previously previewed futures calendar roll."""
-        if os.environ.get("IBKR_READONLY", "").lower() == "true":
+        if IBKR_READONLY:
             raise ValueError("IBKR is in read-only mode. Cannot place orders.")
 
         account_id = self._resolve_native_account(account_id)

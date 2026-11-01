@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from brokerage._logging import portfolio_logger
-from brokerage.broker_adapter import BrokerAdapter
+from brokerage.broker_adapter import BrokerAdapter, SubmissionOutcomeUnknownError
 from brokerage.snaptrade._shared import ApiException, _extract_snaptrade_body, is_snaptrade_secret_error
 from brokerage.snaptrade.client import (
     _detail_brokerage_authorization_with_retry,
@@ -314,7 +314,7 @@ class SnapTradeBrokerAdapter(BrokerAdapter):
             budget_user_id=self._user_id,
         )
         if not isinstance(response_raw, Mapping):
-            raise RuntimeError(
+            raise SubmissionOutcomeUnknownError(
                 "SnapTrade order placement returned a non-mapping response "
                 f"({type(response_raw).__name__}); cannot confirm the order was accepted. "
                 "The order MAY ALREADY BE LIVE at the brokerage; verify before retrying."
@@ -328,7 +328,7 @@ class SnapTradeBrokerAdapter(BrokerAdapter):
             or response.get("id")
         )
         if brokerage_order_id is None or not str(brokerage_order_id).strip():
-            raise RuntimeError(
+            raise SubmissionOutcomeUnknownError(
                 "SnapTrade order placement returned no brokerage order id "
                 f"(status={response.get('status')!r}); we cannot reference, cancel, or "
                 "reconcile it. The order MAY ALREADY BE LIVE at the brokerage; verify before "

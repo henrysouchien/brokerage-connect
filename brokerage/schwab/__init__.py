@@ -1,7 +1,14 @@
 from brokerage.schwab.adapter import SchwabBrokerAdapter
 from brokerage.schwab.client import (
+    SCHWAB_CONNECTION_STATUSES,
+    SCHWAB_REAUTH_STATUSES,
+    SCHWAB_REFRESH_TOKEN_MAX_AGE_DAYS,
+    SCHWAB_REFRESH_TOKEN_URGENT_DAYS,
+    SCHWAB_REFRESH_TOKEN_WARN_DAYS,
+    SCHWAB_UNCOUNTED_STATUSES,
     cancel_order,
     check_token_health,
+    derive_schwab_connection_status,
     get_account_data,
     get_account_hashes,
     get_orders_for_account,
@@ -11,14 +18,22 @@ from brokerage.schwab.client import (
     invalidate_schwab_caches,
     is_invalid_grant_error,
     place_order,
+    probe_schwab_token_file,
     search_instruments,
     schwab_login,
 )
 
 __all__ = [
+    "SCHWAB_CONNECTION_STATUSES",
+    "SCHWAB_REAUTH_STATUSES",
+    "SCHWAB_REFRESH_TOKEN_MAX_AGE_DAYS",
+    "SCHWAB_REFRESH_TOKEN_URGENT_DAYS",
+    "SCHWAB_REFRESH_TOKEN_WARN_DAYS",
+    "SCHWAB_UNCOUNTED_STATUSES",
     "SchwabBrokerAdapter",
     "cancel_order",
     "check_token_health",
+    "derive_schwab_connection_status",
     "get_account_data",
     "get_account_hashes",
     "get_orders_for_account",
@@ -28,6 +43,7 @@ __all__ = [
     "invalidate_schwab_caches",
     "is_invalid_grant_error",
     "place_order",
+    "probe_schwab_token_file",
     "search_instruments",
     "schwab_login",
 ]

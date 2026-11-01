@@ -51,8 +51,28 @@ def _extract_secret_from_response(response) -> str:
     return str(new_secret)
 
 
+_configured_recovery_dir: str | None = None
+
+
+def configure_snaptrade_recovery_dir(path: str | os.PathLike[str]) -> None:
+    """Bind the SnapTrade recovery-secret directory for this process.
+
+    Overrides the standalone default ``~/.snaptrade_recovery``. Call before
+    any recovery file is written.
+    """
+    global _configured_recovery_dir
+    configured = os.fspath(path)
+    _configured_recovery_dir = configured
+
+
+def _recovery_dir() -> str:
+    if _configured_recovery_dir is not None:
+        return os.path.expanduser(_configured_recovery_dir)
+    return os.path.expanduser("~/.snaptrade_recovery")
+
+
 def _write_recovery_file(user_email: str, user_secret: str) -> str:
-    recovery_dir = os.path.expanduser("~/.snaptrade_recovery")
+    recovery_dir = _recovery_dir()
     os.makedirs(recovery_dir, mode=0o700, exist_ok=True)
     os.chmod(recovery_dir, 0o700)
 

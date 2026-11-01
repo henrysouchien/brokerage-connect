@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 from brokerage._shared.budget_guard import guard_call
 
 from brokerage._logging import portfolio_logger
-from brokerage.broker_adapter import BrokerAdapter
+from brokerage.broker_adapter import BrokerAdapter, SubmissionOutcomeUnknownError
 from brokerage.schwab.client import (
     _extract_instrument_for_symbol,
     get_account_hashes,
@@ -724,7 +724,7 @@ class SchwabBrokerAdapter(BrokerAdapter):
         # have been placed at Schwab; the operator must verify in the Schwab UI.
         SUCCESS_STATUS_CODES = {200, 201, 202, 204}
         if status_code not in SUCCESS_STATUS_CODES or brokerage_order_id is None:
-            raise RuntimeError(
+            raise SubmissionOutcomeUnknownError(
                 "Schwab order placement returned an unexpected response: "
                 f"status_code={status_code} brokerage_order_id={brokerage_order_id!r}. "
                 "If status_code is 2xx, the order may have been placed at Schwab "

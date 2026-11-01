@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.8 (2026-10-31)
+
+- IBKR relay configuration reads the gateway origin from the forest-canonical `GATEWAY_BASE_URL`, not `GATEWAY_URL`; the validation messages and `PROD_LOOPBACK_GATEWAY_BASE_URL` name the same key. No fallback chain and no alias: a relay process that only exports the retired name is rejected, as the platform's one-name contract requires.
+- Added application-supplied Schwab token, SnapTrade recovery, and IBKR shared-lock path configuration. Existing standalone environment/home/tempdir defaults remain unchanged.
+- `IBKR_READONLY` now parses only explicit `true`/`false` values (case-insensitive, surrounding whitespace ignored) at the `brokerage.config` owner; malformed explicit values raise `ValueError` instead of silently enabling trading. All IBKR connection and order guards use that one decision.
+
 ## 0.6.7 (2026-09-16)
 
 - Excludes PyArrow 25.0.0 due to Apache Arrow #50471's worker-thread allocator crash; 25.0.1 remains supported.

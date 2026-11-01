@@ -10,8 +10,9 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, TypeVar
 import httpx
 import pandas as pd
 
+from brokerage._logging import portfolio_logger
 from brokerage._vendor import make_json_safe
-from brokerage.broker_adapter import BrokerAdapter
+from brokerage.broker_adapter import BrokerAdapter, SubmissionOutcomeUnknownError
 from brokerage.relay_config import assert_valid_ibkr_relay_env, normalized_gateway_url
 from brokerage.trade_objects import (
     BrokerAccount,
@@ -32,6 +33,10 @@ class BrokerAdapterError(RuntimeError):
 
 
 _T = TypeVar("_T")
+
+# httpx failures raised before any request bytes leave this process; every other
+# RequestError (read/write timeout, protocol error, dropped connection) may follow delivery.
+_PRE_SEND_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
 
 
 def _serialize_value(value: Any) -> Any:
@@ -91,7 +96,17 @@ class IBKRRelayAdapter(BrokerAdapter):
     def probe(self) -> dict[str, Any]:
         return self._dispatch("ibkr.probe", {}, no_replay=False)
 
-    def _dispatch(self, tool_name: str, tool_input: Dict[str, Any], *, no_replay: bool) -> Any:
+    def _dispatch(
+        self,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        *,
+        no_replay: bool,
+        submits_order: bool = False,
+    ) -> Any:
+        # A placement failure after the request could have reached the gateway leaves the
+        # order possibly live; every other relay failure stays a plain transport error.
+        outcome_error: type[RuntimeError] = SubmissionOutcomeUnknownError if submits_order else BrokerAdapterError
         if self._user_id is None:
             raise BrokerAdapterError("relay_user_id_unbound")
         if not self._service_token:
@@ -113,14 +128,15 @@ class IBKRRelayAdapter(BrokerAdapter):
                     headers={"X-IBKR-Service-Token": self._service_token},
                 )
         except httpx.RequestError as exc:
-            raise BrokerAdapterError(f"relay_request_failed:{exc}") from exc
+            request_error = BrokerAdapterError if isinstance(exc, _PRE_SEND_ERRORS) else outcome_error
+            raise request_error(f"relay_request_failed:{exc}") from exc
 
         if response.status_code == 401:
             raise BrokerAdapterError("service_auth_failed")
         if response.status_code == 503:
             raise BrokerAdapterError("relay_disconnected")
         if response.status_code == 504:
-            raise BrokerAdapterError("relay_timeout")
+            raise outcome_error("relay_timeout")
 
         body: Any = None
         try:
@@ -133,7 +149,7 @@ class IBKRRelayAdapter(BrokerAdapter):
             raise BrokerAdapterError(f"relay_http_{response.status_code}:{detail}")
 
         if not isinstance(body, dict):
-            raise BrokerAdapterError("relay_bad_payload:response")
+            raise outcome_error("relay_bad_payload:response")
         relay_error = body.get("error")
         if relay_error:
             if isinstance(relay_error, dict):
@@ -146,7 +162,12 @@ class IBKRRelayAdapter(BrokerAdapter):
         return _coerce_dataclass(OrderPreview, self._dispatch(tool_name, tool_input, no_replay=False))
 
     def _dispatch_order_result(self, tool_name: str, tool_input: Dict[str, Any], *, no_replay: bool) -> OrderResult:
-        return _coerce_dataclass(OrderResult, self._dispatch(tool_name, tool_input, no_replay=no_replay))
+        result = self._dispatch(tool_name, tool_input, no_replay=no_replay, submits_order=True)
+        try:
+            return _coerce_dataclass(OrderResult, result)
+        except (BrokerAdapterError, TypeError) as exc:
+            # The relay answered a placement with a reply we cannot read as an OrderResult.
+            raise SubmissionOutcomeUnknownError(str(exc)) from exc
 
     def owns_account(self, account_id: str) -> bool:
         return bool(
@@ -250,12 +271,19 @@ class IBKRRelayAdapter(BrokerAdapter):
         return None if result is None else float(result)
 
     def refresh_after_trade(self, account_id: str) -> None:
-        self._dispatch(
-            "ibkr.refresh_after_trade",
-            {"account_id": account_id},
-            no_replay=False,
-        )
-        self._on_refresh(account_id)
+        try:
+            self._dispatch(
+                "ibkr.refresh_after_trade",
+                {"account_id": account_id},
+                no_replay=False,
+            )
+            self._on_refresh(account_id)
+        except Exception as exc:
+            portfolio_logger.warning(
+                "IBKR relay refresh_after_trade failed for account %s: %s",
+                account_id,
+                exc,
+            )
 
     def fetch_market_snapshot(
         self,

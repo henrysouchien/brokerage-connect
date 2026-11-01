@@ -23,8 +23,6 @@ from typing import Any, Dict
 import pandas as pd
 from pandas.errors import EmptyDataError, ParserError
 
-from brokerage import config
-
 
 CURRENT_MONTH_TTL_HOURS = 4
 
@@ -48,25 +46,16 @@ def _contract_identity_fingerprint(contract_identity: dict[str, Any] | None) -> 
     return hashlib.md5("|".join(sorted(id_parts)).encode()).hexdigest()[:8]
 
 
-def _project_root() -> Path:
-    """Return the configured application cache directory or standalone default."""
-    configured = os.getenv("IBKR_CACHE_DIR")
-    if configured:
-        return Path(configured).expanduser().resolve()
-
-    if config.CACHE_ROOT is not None:
-        return config.CACHE_ROOT / "cache" / "ibkr"
-
-    return Path.home() / ".cache" / "ibkr-mcp"
-
-
 def _cache_dir(base_dir: str | Path | None = None) -> Path:
     """Resolve and ensure the IBKR disk-cache directory."""
     if base_dir is not None:
         root = Path(base_dir).expanduser().resolve()
         path = root / "cache" / "ibkr"
     else:
-        path = _project_root()
+        configured = os.getenv("IBKR_CACHE_DIR", "").strip()
+        if not configured:
+            raise RuntimeError("IBKR_CACHE_DIR must be configured")
+        path = Path(configured).expanduser().resolve()
     path.mkdir(parents=True, exist_ok=True)
     return path
 

@@ -10,7 +10,6 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from brokerage import config
 from brokerage._shared.timeseries_store import TimeSeriesStore
 
 from .contracts import _normalize_fx_pair
@@ -26,24 +25,19 @@ class IBKRTransientError(Exception):
 
 def _resolve_cache_dir() -> Path:
     """Resolve the IBKR timeseries cache directory."""
-    ts_env = os.getenv("IBKR_TIMESERIES_CACHE_DIR")
+    ts_env = os.getenv("IBKR_TIMESERIES_CACHE_DIR", "").strip()
     if ts_env:
         resolved = Path(ts_env).expanduser().resolve()
         resolved.mkdir(parents=True, exist_ok=True)
         return resolved
 
-    ibkr_env = os.getenv("IBKR_CACHE_DIR")
+    ibkr_env = os.getenv("IBKR_CACHE_DIR", "").strip()
     if ibkr_env:
         resolved = Path(ibkr_env).expanduser().resolve().parent / "ibkr_timeseries"
         resolved.mkdir(parents=True, exist_ok=True)
         return resolved
 
-    if config.CACHE_ROOT is not None:
-        resolved = config.CACHE_ROOT / "cache" / "ibkr_timeseries"
-    else:
-        resolved = Path.home() / ".cache" / "ibkr-mcp" / "ibkr_timeseries"
-    resolved.mkdir(parents=True, exist_ok=True)
-    return resolved
+    raise RuntimeError("IBKR_CACHE_DIR or IBKR_TIMESERIES_CACHE_DIR must be configured")
 
 
 def get_ibkr_timeseries_store(cache_dir: str | Path | None = None) -> TimeSeriesStore:
